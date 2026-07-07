@@ -11,13 +11,20 @@
 //     writes a row into the Notion "Railway Health" database, creates a
 //     Notion "Approvals" item when something looks wrong, and can fold a
 //     live health summary into the Daily Brief.
+//   - Google Doc + Email Delivery (OAuth, never a password): after
+//     /run-full-brief writes to Notion, it also creates/updates a Google
+//     Doc with the full brief and emails a short summary to FOUNDER_EMAIL.
+//     Delivery is additive — a missing Google setup or a delivery failure
+//     never blocks the Notion brief from being created (see Step 5J in
+//     lib/googleDeliveryAgent.js).
 // Still NOT in scope:
 //   - Social channels
-//   - Email or SMS sending
+//   - SMS sending
 //   - Anything that writes to Stripe (read-only: no charges, no refunds,
 //     no subscription cancellations, no customer updates)
 //   - Anything that changes Railway (read-only: no restarts, no redeploys,
 //     no variable changes, no deletions)
+//   - Emailing anyone other than FOUNDER_EMAIL
 
 require('dotenv').config();
 
@@ -26,6 +33,7 @@ const { Client } = require('@notionhq/client');
 const Stripe = require('stripe');
 const stripeRevenueAgent = require('./lib/stripeRevenueAgent');
 const railwayHealthAgent = require('./lib/railwayHealthAgent');
+const googleDeliveryAgent = require('./lib/googleDeliveryAgent');
 
 const app = express();
 app.use(express.json());
@@ -277,9 +285,39 @@ app.post('/run-full-brief', async (req, res) => {
       children: brief.children,
     });
 
+    // Step 5: Google Doc + email delivery. This never throws and never
+    // blocks this response — a missing Google setup or a delivery failure
+    // just gets recorded on the Notion row below instead (Step 5J).
+    const delivery = await googleDeliveryAgent.deliverDailyBrief({
+      dateLabel: brief.dateLabel,
+      displayDate: brief.displayDate,
+      statusLabel: brief.statusLabel,
+      topPriorities: brief.topPriorities,
+      salesMetrics: metrics,
+      railwayHealth: health,
+      missingDataSources: brief.missingDataSources,
+      founderTodos: brief.founderTodos,
+      approvalRequests: brief.approvalRequests,
+    });
+
+    try {
+      await notion.pages.update({
+        page_id: briefPage.id,
+        properties: buildDeliveryProperties(delivery),
+      });
+    } catch (err) {
+      // Doc and/or email may have already succeeded — don't fail the
+      // request over this follow-up write. Log it so it's visible in
+      // Railway logs (Step 5J: "email works, Notion fails -> log error").
+      console.error(
+        '[notion error] Failed to write delivery status back to the Daily Brief row:',
+        err.body || err.message || err
+      );
+    }
+
     return res.status(201).json({
       status: 'ok',
-      message: 'Revenue sync + Railway health + daily brief complete.',
+      message: 'Revenue sync + Railway health + daily brief + delivery complete.',
       metrics,
       salesPageUrl: salesPage.url,
       approvalCreated: Boolean(approvalPage),
@@ -288,9 +326,136 @@ app.post('/run-full-brief', async (req, res) => {
       healthPageUrl: healthPage.url,
       railwayApprovalsCreated: approvalPages.map((p) => p.url),
       dailyBriefUrl: briefPage.url,
+      delivery,
     });
   } catch (err) {
     return handleNotionError(res, err);
+  }
+});
+
+// GET /auth/google
+// Step 5G: one-time setup route. Redirects the founder to Google's OAuth
+// consent screen. Visit this in a browser, not curl — it's a redirect meant
+// for a human to click through.
+app.get('/auth/google', (req, res) => {
+  const missing = googleDeliveryAgent.getMissingEnvVars(googleDeliveryAgent.OAUTH_SETUP_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  return res.redirect(googleDeliveryAgent.getAuthUrl());
+});
+
+// GET /oauth2callback
+// Step 5G: Google redirects here after consent, with a one-time ?code=.
+// Exchanges it for tokens and shows the refresh token ONCE so it can be
+// copied into Railway as GOOGLE_REFRESH_TOKEN. This route is the setup
+// flow itself, so displaying the token here is intentional — no other
+// route in this service ever exposes it.
+app.get('/oauth2callback', async (req, res) => {
+  const missing = googleDeliveryAgent.getMissingEnvVars(googleDeliveryAgent.OAUTH_SETUP_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  const code = req.query.code;
+  if (!code) {
+    return res.status(400).json({ error: 'Missing ?code= from Google OAuth redirect.' });
+  }
+
+  try {
+    const tokens = await googleDeliveryAgent.exchangeCodeForTokens(code);
+
+    if (tokens.refresh_token) {
+      console.log('[google oauth setup] Refresh token (copy this into Railway as GOOGLE_REFRESH_TOKEN):');
+      console.log(tokens.refresh_token);
+    } else {
+      console.warn(
+        '[google oauth setup] No refresh_token in the response — Google only issues one on first consent. ' +
+          'If you already authorized this app before, revoke access at https://myaccount.google.com/permissions ' +
+          'and visit /auth/google again.'
+      );
+    }
+
+    return res.status(200).json({
+      status: 'ok',
+      message: tokens.refresh_token
+        ? 'Authorization complete. Copy refreshToken below into Railway as GOOGLE_REFRESH_TOKEN, then redeploy. Keep it private.'
+        : 'Authorization complete, but no refresh token was issued (already authorized before). Revoke access at https://myaccount.google.com/permissions and try /auth/google again to force a new one.',
+      refreshToken: tokens.refresh_token || null,
+    });
+  } catch (err) {
+    return handleGoogleError(res, err);
+  }
+});
+
+// POST /create-test-doc
+// Step 5H. Creates a small test Google Doc so you can confirm OAuth +
+// Docs/Drive scopes work before relying on /run-full-brief.
+app.post('/create-test-doc', async (req, res) => {
+  const missing = googleDeliveryAgent.getMissingEnvVars(googleDeliveryAgent.DELIVERY_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    const auth = googleDeliveryAgent.getAuthorizedClient();
+    const result = await googleDeliveryAgent.createOrUpdateDoc({
+      auth,
+      title: `Adaptiv Automation Hub — Test Doc — ${new Date().toISOString()}`,
+      sections: googleDeliveryAgent.buildDocSections({
+        displayDate: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
+        statusLabel: 'Test',
+        topPriorities: ['This is a test document from POST /create-test-doc.'],
+        salesMetrics: null,
+        railwayHealth: null,
+        missingDataSources: ['N/A — this is a connectivity test, not a real brief.'],
+        founderTodos: ['Confirm this document appeared in Google Drive, then delete it.'],
+        approvalRequests: ['None — test document.'],
+      }),
+      folderId: process.env.GOOGLE_DOC_FOLDER_ID || null,
+    });
+
+    return res.status(201).json({ status: 'ok', message: 'Test Google Doc created.', docUrl: result.docUrl });
+  } catch (err) {
+    return handleGoogleError(res, err);
+  }
+});
+
+// POST /send-test-email
+// Step 5H. Sends a test email to FOUNDER_EMAIL only — confirms Gmail send
+// scope works before relying on /run-full-brief.
+app.post('/send-test-email', async (req, res) => {
+  const missing = googleDeliveryAgent.getMissingEnvVars(googleDeliveryAgent.DELIVERY_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    const auth = googleDeliveryAgent.getAuthorizedClient();
+    await googleDeliveryAgent.sendBriefEmail({
+      auth,
+      subject: 'Adaptiv Automation Hub — Test Email',
+      bodyText:
+        'This is a test email from the Adaptiv Automation Hub (POST /send-test-email).\n\n' +
+        'If you got this, Gmail send + OAuth are working correctly.',
+    });
+
+    return res.status(200).json({ status: 'ok', message: `Test email sent to ${process.env.FOUNDER_EMAIL}.` });
+  } catch (err) {
+    return handleGoogleError(res, err);
   }
 });
 
@@ -419,9 +584,10 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals 
   }
 
   const titleSuffix = salesMetrics || railwayHealth ? '' : ' (test)';
+  const statusLabel = 'Yellow';
 
   const bodyBlocks = [
-    heading('Company Status: Yellow'),
+    heading(`Company Status: ${statusLabel}`),
     paragraph(
       salesMetrics || railwayHealth
         ? `Daily brief generated by the Railway Automation Hub on ${displayDate}, including live data from the connected agents below.`
@@ -455,7 +621,7 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals 
         title: [{ text: { content: `Daily Brief — ${dateLabel}${titleSuffix}` } }],
       },
       Status: {
-        status: { name: 'Yellow' },
+        status: { name: statusLabel },
       },
       Date: {
         date: { start: dateLabel },
@@ -465,6 +631,17 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals 
       },
     },
     children: flattenChildren(bodyBlocks),
+    // Plain-value ingredients (not Notion-shaped) — used by
+    // googleDeliveryAgent.deliverDailyBrief() in /run-full-brief so the
+    // Google Doc and email stay in sync with the Notion page without
+    // recomputing this content twice.
+    dateLabel,
+    displayDate,
+    statusLabel,
+    topPriorities,
+    missingDataSources,
+    founderTodos,
+    approvalRequests,
   };
 }
 
@@ -525,6 +702,45 @@ function handleRailwayError(res, err) {
     error: 'Unexpected error fetching data from Railway.',
     details: err.message || String(err),
   });
+}
+
+function handleGoogleError(res, err) {
+  console.error('[google error]', (err.response && err.response.data) || err.message || err);
+
+  const status = err.code || (err.response && err.response.status);
+
+  if (status === 401 || status === 403) {
+    return res.status(401).json({
+      error:
+        'Google rejected the request as unauthorized. Check GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / ' +
+        'GOOGLE_REDIRECT_URI / GOOGLE_REFRESH_TOKEN — the refresh token may need to be regenerated via /auth/google.',
+      details: (err.response && err.response.data) || err.message,
+    });
+  }
+
+  if (status === 429) {
+    return res.status(429).json({
+      error: 'Hit Google API rate limits. Try again shortly.',
+    });
+  }
+
+  return res.status(502).json({
+    error: 'Unexpected error from Google (Docs/Drive/Gmail).',
+    details: (err.response && err.response.data) || err.message || String(err),
+  });
+}
+
+// Step 5F: maps a deliverDailyBrief() result onto the 4 Notion Daily Brief
+// properties. docError (if the doc failed but email didn't) is folded into
+// Email Error too, since there's no separate "Doc Error" column.
+function buildDeliveryProperties(delivery) {
+  const errorText = delivery.emailError || (delivery.docError ? `Doc error: ${delivery.docError}` : '');
+  return {
+    'Google Doc': { url: delivery.docUrl || null },
+    'Email Sent': { checkbox: Boolean(delivery.emailSent) },
+    'Email Error': { rich_text: [{ text: { content: errorText } }] },
+    'Delivery Status': { select: { name: delivery.deliveryStatus } },
+  };
 }
 
 function handleNotionError(res, err) {
