@@ -17,9 +17,13 @@
 //     Delivery is additive — a missing Google setup or a delivery failure
 //     never blocks the Notion brief from being created (see Step 5J in
 //     lib/googleDeliveryAgent.js).
+//   - SMS Summary (Twilio, opt-in via SMS_ENABLED): after Google delivery,
+//     sends a short text summary of the brief to FOUNDER_PHONE_NUMBER only.
+//     Additive like Google delivery — disabled, unconfigured, or failed SMS
+//     never blocks the Notion brief or the rest of /run-full-brief (see
+//     Step 6G in lib/smsDeliveryAgent.js).
 // Still NOT in scope:
 //   - Social channels
-//   - SMS sending
 //   - Anything that writes to Stripe (read-only: no charges, no refunds,
 //     no subscription cancellations, no customer updates)
 //   - Anything that changes Railway (read-only: no restarts, no redeploys,
@@ -34,6 +38,8 @@ const Stripe = require('stripe');
 const stripeRevenueAgent = require('./lib/stripeRevenueAgent');
 const railwayHealthAgent = require('./lib/railwayHealthAgent');
 const googleDeliveryAgent = require('./lib/googleDeliveryAgent');
+const smsDeliveryAgent = require('./lib/smsDeliveryAgent');
+const productBugAgent = require('./lib/productBugAgent');
 
 const app = express();
 app.use(express.json());
@@ -72,6 +78,22 @@ const RAILWAY_HEALTH_REQUIRED_ENV_VARS = [
   'BACKEND_HEALTH_URL',
 ];
 
+// Step 7: Product/Bug Agent. NOTION_DATABASE_TASKS / NOTION_DATABASE_APPROVALS
+// are deliberately NOT required here — task/approval creation is additive
+// (see writeBugRecords below), so /submit-bug still works before those two
+// vars are wired up, same additive philosophy as Google/SMS delivery.
+const PRODUCT_BUG_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_PRODUCT_BUGS'];
+const FEEDBACK_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_BETA_FEEDBACK'];
+const PRODUCT_TRIAGE_REQUIRED_ENV_VARS = [
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_PRODUCT_BUGS',
+  'NOTION_DATABASE_BETA_FEEDBACK',
+];
+
+// Deliberately does NOT include the Step 7 vars — the Product/Bug section of
+// /run-full-brief is additive (see the productBugSummary block in that
+// route), so a full brief still runs even before Step 7's Notion databases
+// are wired up in Railway.
 const FULL_BRIEF_REQUIRED_ENV_VARS = [
   ...new Set([
     ...DAILY_BRIEF_REQUIRED_ENV_VARS,
@@ -235,6 +257,141 @@ app.post('/run-railway-health', async (req, res) => {
   }
 });
 
+// POST /submit-bug
+// Step 7. Records one bug/feature-request/UX-issue/etc. into the Notion
+// Product Bugs database. Computes a Priority Score from severity + the
+// blocks-signup/payment/etc. flags (see lib/productBugAgent.js). For
+// Critical or High severity, also creates a Notion Tasks row. For Critical
+// severity only, also creates a Notion Approvals row ("Needs Approval").
+// Never changes app code, never closes a bug, never deploys anything —
+// Status is always written as "New".
+app.post('/submit-bug', async (req, res) => {
+  const missing = getMissingEnvVars(PRODUCT_BUG_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  const validation = productBugAgent.validateBugInput(req.body);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Invalid bug submission', details: validation.errors });
+  }
+
+  try {
+    const result = await writeBugRecords(validation.normalized);
+    return res.status(201).json({
+      status: 'ok',
+      message: 'Bug recorded in Product Bugs.',
+      priorityScore: result.priorityScore,
+      bugPageUrl: result.bugPage.url,
+      taskCreated: Boolean(result.taskPage),
+      taskPageUrl: result.taskPage ? result.taskPage.url : null,
+      approvalCreated: Boolean(result.approvalPage),
+      approvalPageUrl: result.approvalPage ? result.approvalPage.url : null,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
+// POST /submit-feedback
+// Step 7. Records one beta-tester/coach/athlete feedback item into the
+// Notion Beta Feedback database. If 3+ open feedback items now share the
+// same Area, the response includes a read-only recommendation to fix that
+// area — no Notion row is created for the recommendation itself.
+app.post('/submit-feedback', async (req, res) => {
+  const missing = getMissingEnvVars(FEEDBACK_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  const validation = productBugAgent.validateFeedbackInput(req.body);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Invalid feedback submission', details: validation.errors });
+  }
+
+  try {
+    const feedbackPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_BETA_FEEDBACK },
+      properties: productBugAgent.buildFeedbackRowProperties(validation.normalized),
+    });
+
+    let recommendation = null;
+    if (validation.normalized.area) {
+      try {
+        const existing = await notion.databases.query({
+          database_id: process.env.NOTION_DATABASE_BETA_FEEDBACK,
+          page_size: 100,
+        });
+        const sameAreaCount = existing.results.filter((page) => {
+          const areaProp = page.properties['Area'];
+          return areaProp && areaProp.select && areaProp.select.name === validation.normalized.area;
+        }).length;
+        if (sameAreaCount >= 3) {
+          recommendation = `${sameAreaCount} beta feedback items now mention "${validation.normalized.area}" — recommend a UX fix for this area.`;
+        }
+      } catch (err) {
+        // Non-fatal — the feedback row above already saved successfully.
+        // The repeat-check is a nice-to-have, not required for this route
+        // to succeed.
+        console.error('[product bug agent] Repeat-feedback check failed (non-fatal):', err.body || err.message || err);
+      }
+    }
+
+    return res.status(201).json({
+      status: 'ok',
+      message: 'Feedback recorded in Beta Feedback.',
+      feedbackPageUrl: feedbackPage.url,
+      recommendation,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
+// POST /run-product-triage
+// Step 7. Read-only report: queries the current open state of Product Bugs
+// + Beta Feedback, ranks open bugs by Priority Score, and returns the same
+// Green/Yellow/Red status + counts used in the Daily Brief. Does not close
+// bugs, does not create Tasks/Approvals, does not change anything — use
+// /submit-bug for that.
+app.post('/run-product-triage', async (req, res) => {
+  const missing = getMissingEnvVars(PRODUCT_TRIAGE_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    const summary = await productBugAgent.gatherProductBugSummary(notion, {
+      productBugsDbId: process.env.NOTION_DATABASE_PRODUCT_BUGS,
+      betaFeedbackDbId: process.env.NOTION_DATABASE_BETA_FEEDBACK,
+    });
+
+    return res.status(200).json({
+      status: 'ok',
+      message: 'Product/Bug triage complete. Read-only — no bugs closed, no code changed, nothing created by this route.',
+      productStatus: summary.status,
+      criticalBugs: summary.criticalBugs,
+      highBugs: summary.highBugs,
+      filmAIBlockers: summary.filmAIBlockers,
+      newFeedbackCount: summary.newFeedbackCount,
+      recommendedFixToday: summary.recommendedFixToday,
+      rankedOpenBugs: summary.rankedOpenBugs,
+      repeatedFeedbackAreas: summary.repeatedAreas,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
 // POST /run-full-brief
 // Runs the Stripe revenue sync and the Railway health check (each writing
 // their own Sales/Railway Health rows and any Approval items), then creates
@@ -270,6 +427,23 @@ app.post('/run-full-brief', async (req, res) => {
     return handleRailwayError(res, err);
   }
 
+  // Step 7: Product/Bug summary. Additive like Google/SMS delivery — a
+  // missing NOTION_DATABASE_PRODUCT_BUGS/BETA_FEEDBACK or a Notion read
+  // failure here never blocks the rest of the brief. tasksCreatedCount stays
+  // 0 here since this route only reads open bugs/feedback; task creation
+  // only happens from /submit-bug.
+  let productBugSummary = null;
+  if (getMissingEnvVars(PRODUCT_TRIAGE_REQUIRED_ENV_VARS).length === 0) {
+    try {
+      productBugSummary = await productBugAgent.gatherProductBugSummary(notion, {
+        productBugsDbId: process.env.NOTION_DATABASE_PRODUCT_BUGS,
+        betaFeedbackDbId: process.env.NOTION_DATABASE_BETA_FEEDBACK,
+      });
+    } catch (err) {
+      console.error('[product bug agent] Failed to gather summary for daily brief (non-fatal):', err.body || err.message || err);
+    }
+  }
+
   try {
     const { salesPage, approvalPage } = await writeRevenueRecords(metrics);
     const { healthPage, approvalPages, approvalDrafts } = await writeRailwayHealthRecords(health);
@@ -278,6 +452,7 @@ app.post('/run-full-brief', async (req, res) => {
       salesMetrics: metrics,
       railwayHealth: health,
       railwayApprovals: approvalDrafts,
+      productBugSummary,
     });
     const briefPage = await notion.pages.create({
       parent: { database_id: process.env.NOTION_DATABASE_DAILY_BRIEFS },
@@ -300,15 +475,28 @@ app.post('/run-full-brief', async (req, res) => {
       approvalRequests: brief.approvalRequests,
     });
 
+    // Step 6: SMS summary. Also never throws and never blocks this
+    // response — disabled/unconfigured/failed SMS just gets recorded on
+    // the Notion row below (Step 6G). Runs after Google delivery so it can
+    // include the Google Doc link when available.
+    const sms = await smsDeliveryAgent.deliverSms({
+      statusLabel: brief.statusLabel,
+      salesMetrics: metrics,
+      railwayHealth: health,
+      approvalRequests: brief.approvalRequests,
+      topPriorities: brief.topPriorities,
+      docUrl: delivery.docUrl,
+    });
+
     try {
       await notion.pages.update({
         page_id: briefPage.id,
-        properties: buildDeliveryProperties(delivery),
+        properties: { ...buildDeliveryProperties(delivery), ...buildSmsProperties(sms) },
       });
     } catch (err) {
-      // Doc and/or email may have already succeeded — don't fail the
-      // request over this follow-up write. Log it so it's visible in
-      // Railway logs (Step 5J: "email works, Notion fails -> log error").
+      // Doc/email/SMS may have already succeeded — don't fail the request
+      // over this follow-up write. Log it so it's visible in Railway logs
+      // (Step 5J: "email works, Notion fails -> log error").
       console.error(
         '[notion error] Failed to write delivery status back to the Daily Brief row:',
         err.body || err.message || err
@@ -317,7 +505,7 @@ app.post('/run-full-brief', async (req, res) => {
 
     return res.status(201).json({
       status: 'ok',
-      message: 'Revenue sync + Railway health + daily brief + delivery complete.',
+      message: 'Revenue sync + Railway health + daily brief + delivery + SMS complete.',
       metrics,
       salesPageUrl: salesPage.url,
       approvalCreated: Boolean(approvalPage),
@@ -325,8 +513,10 @@ app.post('/run-full-brief', async (req, res) => {
       health,
       healthPageUrl: healthPage.url,
       railwayApprovalsCreated: approvalPages.map((p) => p.url),
+      productBugSummary,
       dailyBriefUrl: briefPage.url,
       delivery,
+      sms,
     });
   } catch (err) {
     return handleNotionError(res, err);
@@ -459,6 +649,37 @@ app.post('/send-test-email', async (req, res) => {
   }
 });
 
+// POST /send-test-sms
+// Step 6D. Sends a short test SMS to FOUNDER_PHONE_NUMBER only — confirms
+// Twilio credentials + the from-number work before relying on
+// /run-full-brief. Respects SMS_ENABLED like the real delivery path: if
+// SMS is disabled, this route says so instead of silently sending anyway.
+app.post('/send-test-sms', async (req, res) => {
+  if (!smsDeliveryAgent.isSmsEnabled()) {
+    return res.status(200).json({
+      status: 'disabled',
+      message: 'SMS_ENABLED is not set to "true" — no test SMS was sent. Set SMS_ENABLED=true in Railway to enable.',
+    });
+  }
+
+  const missing = smsDeliveryAgent.getMissingEnvVars(smsDeliveryAgent.SMS_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    await smsDeliveryAgent.sendSms(
+      'Adaptiv Automation Hub — Test SMS. If you got this, Twilio + FOUNDER_PHONE_NUMBER are working correctly.'
+    );
+    return res.status(200).json({ status: 'ok', message: `Test SMS sent to ${process.env.FOUNDER_PHONE_NUMBER}.` });
+  } catch (err) {
+    return handleTwilioError(res, err);
+  }
+});
+
 // Fallback 404
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
@@ -519,6 +740,40 @@ async function writeRailwayHealthRecords(health) {
   return { healthPage, approvalPages, approvalDrafts };
 }
 
+// Used by /submit-bug: writes the Product Bugs row, and — additively —
+// a Tasks row (Critical/High severity) and an Approvals row (Critical
+// severity only). Task/Approval creation is skipped, not failed, when the
+// relevant NOTION_DATABASE_TASKS / NOTION_DATABASE_APPROVALS var isn't set
+// yet, so /submit-bug still works while Step 7's env vars are being wired
+// up in Railway. All writes are Notion operations, so callers should catch
+// with handleNotionError.
+async function writeBugRecords(bug) {
+  const priorityScore = productBugAgent.computePriorityScore(bug.severity, bug.flags);
+
+  const bugPage = await notion.pages.create({
+    parent: { database_id: process.env.NOTION_DATABASE_PRODUCT_BUGS },
+    properties: productBugAgent.buildBugRowProperties(bug, priorityScore),
+  });
+
+  let taskPage = null;
+  if ((bug.severity === 'Critical' || bug.severity === 'High') && process.env.NOTION_DATABASE_TASKS) {
+    taskPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_TASKS },
+      properties: productBugAgent.buildBugTaskProperties(bug),
+    });
+  }
+
+  let approvalPage = null;
+  if (bug.severity === 'Critical' && process.env.NOTION_DATABASE_APPROVALS) {
+    approvalPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_APPROVALS },
+      properties: productBugAgent.buildCriticalApprovalProperties(bug),
+    });
+  }
+
+  return { bugPage, priorityScore, taskPage, approvalPage };
+}
+
 // Builds the Notion page payload for the Daily Brief.
 //
 // The "Daily Briefs" database currently has four properties:
@@ -536,7 +791,7 @@ async function writeRailwayHealthRecords(health) {
 // called with { railwayHealth, railwayApprovals }, it swaps in a real
 // Railway Health section and drops the Railway placeholder line too — both
 // used by /run-full-brief.
-function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals } = {}) {
+function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals, productBugSummary } = {}) {
   const today = new Date();
   const dateLabel = today.toISOString().split('T')[0]; // YYYY-MM-DD
   const displayDate = today.toLocaleDateString('en-US', {
@@ -560,6 +815,9 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals 
   }
   if (!salesMetrics) {
     missingDataSources.unshift('Stripe (not connected in this test run)');
+  }
+  if (!productBugSummary) {
+    missingDataSources.push('Product/Bug Agent (Notion Product Bugs / Beta Feedback not wired up yet)');
   }
 
   const founderTodos = [
@@ -604,6 +862,12 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals 
     bodyBlocks.push(...railwayHealthAgent.buildHealthSummaryBlocks(railwayHealth, railwayApprovals || []));
   }
 
+  if (productBugSummary) {
+    // tasksCreatedCount is always 0 here — /run-full-brief only reads open
+    // bugs/feedback for this section; task creation happens on /submit-bug.
+    bodyBlocks.push(...productBugAgent.buildProductBugSummaryBlocks(productBugSummary, 0));
+  }
+
   bodyBlocks.push(
     heading('Top 3 Priorities'),
     numberedList(topPriorities),
@@ -642,6 +906,7 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals 
     missingDataSources,
     founderTodos,
     approvalRequests,
+    productBugSummary: productBugSummary || null,
   };
 }
 
@@ -740,6 +1005,50 @@ function buildDeliveryProperties(delivery) {
     'Email Sent': { checkbox: Boolean(delivery.emailSent) },
     'Email Error': { rich_text: [{ text: { content: errorText } }] },
     'Delivery Status': { select: { name: delivery.deliveryStatus } },
+  };
+}
+
+function handleTwilioError(res, err) {
+  console.error('[twilio error]', (err.moreInfo && err) || err.message || err);
+
+  // Twilio SDK errors carry a numeric `status` (HTTP) and `code` (Twilio
+  // error code, e.g. 21211 invalid "to" number, 21608 unverified trial
+  // number, 20003 auth failure).
+  if (err.status === 401 || err.code === 20003) {
+    return res.status(401).json({
+      error: 'Twilio rejected the request as unauthorized. Check TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN.',
+      details: err.message,
+    });
+  }
+
+  if (err.code === 21211 || err.code === 21608 || err.code === 21606) {
+    return res.status(400).json({
+      error:
+        'Twilio rejected the phone number. Check that TWILIO_FROM_NUMBER and FOUNDER_PHONE_NUMBER are both ' +
+        'valid E.164 numbers, and that FOUNDER_PHONE_NUMBER is verified if this is a Twilio trial account.',
+      details: err.message,
+    });
+  }
+
+  if (err.status === 429) {
+    return res.status(429).json({
+      error: 'Hit Twilio rate limits while sending SMS. Try again shortly.',
+    });
+  }
+
+  return res.status(502).json({
+    error: 'Unexpected error from Twilio while sending SMS.',
+    details: err.message || String(err),
+  });
+}
+
+// Step 6F: maps a deliverSms() result onto the 3 Notion Daily Brief SMS
+// properties.
+function buildSmsProperties(sms) {
+  return {
+    'SMS Sent': { checkbox: Boolean(sms.smsSent) },
+    'SMS Error': { rich_text: [{ text: { content: sms.smsError || '' } }] },
+    'SMS Status': { select: { name: sms.smsStatus } },
   };
 }
 
