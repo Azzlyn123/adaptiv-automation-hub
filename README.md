@@ -1,6 +1,6 @@
 # Adaptiv Automation Hub
 
-Adaptiv Athletics Railway Automation Hub. Currently does six things:
+Adaptiv Athletics Railway Automation Hub. Currently does eight things:
 1. **Daily Brief writer** — writes a Daily CEO Brief into the Notion "Daily Briefs" database.
 2. **Stripe Revenue Agent** (read-only) — pulls subscription data from Stripe, writes a report row into the Notion "Sales" database, and files a Notion "Approvals" item when subscriptions are past due.
 3. **Railway Health Agent** (read-only) — checks the frontend/backend Railway services and the backend health endpoint, writes a report row into the Notion "Railway Health" database, and files a Notion "Approvals" item when something looks wrong.
@@ -8,6 +8,7 @@ Adaptiv Athletics Railway Automation Hub. Currently does six things:
 5. **SMS Summary** (Twilio, opt-in) — after Google delivery, sends a short text summary of the brief to `FOUNDER_PHONE_NUMBER`. Disabled by default — set `SMS_ENABLED=true` to turn it on.
 6. **Product/Bug Agent** — collects bugs, beta feedback, app store issues, and feature requests into the Notion "Product Bugs" and "Beta Feedback" databases, scores each bug's priority, files a Notion "Tasks" row for Critical/High severity bugs and a Notion "Approvals" row for Critical severity bugs, and folds a live Product/Bug summary into `/run-full-brief`.
 7. **Film AI Build Team** (PLANNING ONLY) — seeds a 7-task MVP roadmap for volleyball hitting analysis into the Notion "Film AI Roadmap" database, reports on its status into the Notion "Agent Reports" database, and folds a live Film AI roadmap summary into `/run-full-brief`. Never runs computer vision, never touches real athlete video, never deploys anything — see Step 8 below.
+8. **Coach Sales CRM Agent** — tracks coach/school/club leads in the Notion "Coach CRM" database, scores and ranks them, drafts (never sends) approval-gated outreach copy into the Notion "Coach Outreach" database, reports pipeline status into "Agent Reports", and folds a live Coach Sales summary into `/run-full-brief`. Never emails/texts/DMs a coach, never marks a deal Won, never includes student-athlete data in outreach — see Step 9 below.
 
 Explicitly out of scope:
 - No social channel connections
@@ -18,6 +19,7 @@ Explicitly out of scope:
 - **Only texts `FOUNDER_PHONE_NUMBER`.** The SMS agent never texts anyone else, and the SMS body is always a short summary — never the full report.
 - **No automatic code changes, deploys, bug closures, or feedback deletions.** The Product/Bug Agent only ever creates rows and recommendations — a human triages, fixes, and closes everything.
 - **No computer vision, no real athlete video, ever (yet).** The Film AI Build Team only creates/reads Notion planning rows. No CV model runs, no video is uploaded, processed, or stored, and nothing gets deployed. Real athlete video stays off-limits until the Step 8H privacy gate (review, consent, deletion policy, secure storage plan) is cleared — Film AI data is flagged as a FERPA compliance risk in Adaptiv's business strategy.
+- **No automatic outreach to coaches, ever.** The Coach Sales CRM Agent only ever creates lead rows, outreach drafts, tasks, and recommendations — it never sends an email, text, or DM, and it never marks a deal Won. A human reviews and approves every outreach draft in Notion, then sends it themselves. See Step 9's `SAFETY_RULES` in `lib/coachSalesAgent.js`.
 
 ## File structure
 
@@ -30,7 +32,8 @@ adaptiv-automation-hub/
 │   ├── googleDeliveryAgent.js  OAuth + Google Docs/Drive/Gmail delivery + failure-isolation logic
 │   ├── smsDeliveryAgent.js     Twilio SMS summary + failure-isolation logic
 │   ├── productBugAgent.js      Priority scoring + validation + Notion payload builders for bugs/feedback
-│   └── filmAIPlanningAgent.js  MVP task definitions + Notion payload builders for the Film AI roadmap (planning only)
+│   ├── filmAIPlanningAgent.js  MVP task definitions + Notion payload builders for the Film AI roadmap (planning only)
+│   └── coachSalesAgent.js      Lead scoring + validation + outreach drafting + Notion payload builders for Coach CRM/Outreach
 ├── package.json
 ├── .env.example            Copy to .env for local dev — never commit real .env
 ├── .gitignore
@@ -95,6 +98,12 @@ adaptiv-automation-hub/
    NOTION_DATABASE_AGENT_REPORTS=e00abb4ab7ba431ea6f0714d498db031
    ```
    (`NOTION_DATABASE_AGENT_REPORTS` is only required by `/run-film-ai-planning` — see Step 8B.)
+   For the Coach Sales CRM Agent (`/add-coach-lead`, `/draft-coach-outreach`, `/run-coach-sales-review`), also set:
+   ```
+   NOTION_DATABASE_COACH_CRM=8c3de570b4434d34b416f6179c0c4075
+   NOTION_DATABASE_COACH_OUTREACH=398bbbc738368052adb0f2bbe47b2b1c
+   ```
+   (`NOTION_DATABASE_AGENT_REPORTS` from Step 8 is reused here — only required by `/run-coach-sales-review` — see Step 9B.)
 3. Run it:
    ```
    npm start
@@ -114,6 +123,8 @@ adaptiv-automation-hub/
    curl -X POST http://localhost:3000/run-product-triage
    curl -X POST http://localhost:3000/create-film-ai-mvp-plan
    curl -X POST http://localhost:3000/run-film-ai-planning
+   curl -X POST http://localhost:3000/add-coach-lead -H "Content-Type: application/json" -d "{\"leadName\":\"Test Coach\",\"schoolProgram\":\"Phoenix Test High School\",\"role\":\"Head Coach\",\"sport\":\"Volleyball\",\"source\":\"Founder/Referral\",\"estimatedValue\":99}"
+   curl -X POST http://localhost:3000/run-coach-sales-review
    ```
 
 ## Step 3A — Create a restricted Stripe key
@@ -236,6 +247,31 @@ Step 8. PLANNING ONLY. Writes the 7 volleyball-hitting-analysis MVP tasks (see S
 
 ### `POST /run-film-ai-planning`
 Step 8. Read-only report. Queries the current state of the Film AI Roadmap, rolls it up into a Green/Yellow/Red status (`gatherFilmAISummary()` in `lib/filmAIPlanningAgent.js`), and files one summary row into the Notion Agent Reports database. Does not create or modify a Roadmap task, does not run any CV code, does not touch video. Returns `201` with `filmAIStatus`, `totalTasks`/`openCount`/`blockedCount`/`doneCount`, `criticalOpen`, `blockedTasks`, `tasksByAgent`, `nextUp`, `privacyGateCleared` (always `false` — no code path in this service flips it), and `reportPageUrl`.
+
+### `POST /add-coach-lead`
+Step 9. Records one coach/school/club lead into the Notion Coach CRM database. Body:
+```json
+{
+  "leadName": "", "schoolProgram": "", "role": "Head Coach", "sport": "Volleyball",
+  "email": "", "phone": "", "source": "Founder/Referral", "stage": "New Lead",
+  "priority": "", "lastContact": "", "nextFollowUp": "", "objection": "", "notes": "",
+  "estimatedValue": 0
+}
+```
+Only `leadName` is required — everything else defaults sensibly (`stage` → New Lead). `Approved Outreach` is always written as `false` — no code path in this route can pre-approve outreach. Rejects (`400`) any request that tries to set `stage: "Won"` — marking a deal Won is a manual, human-only edit in Notion, never an automated one (see `SAFETY_RULES` in `lib/coachSalesAgent.js`). Returns `201` with `leadPageUrl`, `leadPageId`, `leadScore`, and `leadScoreReasons` (see Step 9C for the scoring formula).
+
+### `POST /draft-coach-outreach`
+Step 9. Generates a short, coach-friendly outreach draft (deterministic template — no LLM call, so every draft is auditable before a human approves it) and files it into the Notion Coach Outreach database. Body:
+```json
+{
+  "leadPageId": "", "leadName": "", "schoolProgram": "", "role": "Head Coach",
+  "channel": "Email", "context": ""
+}
+```
+`leadPageId` (the Notion page ID of the lead in Coach CRM) and `channel` are required. Rejects (`400`) any request that includes an athlete-specific field (`athleteName`, `athleteData`, `injury`, `medicalInfo`, `grades`, `studentData`) — outreach drafts may never include student-athlete data. `Status` is always written as `"Needs Approval"` and `Approved` is always `false` — no code path in this route can mark a draft Approved or Sent, and **nothing is ever sent**. A human reviews the draft in Notion, edits if needed, and sends it themselves. Returns `201` with `draftPageUrl` and the generated `draftText`.
+
+### `POST /run-coach-sales-review`
+Step 9. Read-only report. Queries Coach CRM (+ Coach Outreach), scores and ranks every lead (Step 9C formula), rolls the pipeline up into a Green/Yellow/Red status against the first-sales target (Step 9E), and files one summary row into the Notion Agent Reports database. Never creates or edits a lead or an outreach draft. Returns `201` with `coachSalesStatus`, `totalLeads`/`activeLeadCount`/`conversationCount`/`demoCount`/`wonCount`/`lostCount`, `outreachDraftCount`/`outreachNeedsApprovalCount`, `topLeads` (top 5, ranked by score), `target`, and `reportPageUrl`.
 
 ## Step 3D — Notion Sales database fields
 
@@ -795,6 +831,152 @@ Adaptiv's business strategy flags data privacy and FERPA compliance as a major r
 
 None of this is built yet, and nothing in this codebase has a path to bypass it — `/create-film-ai-mvp-plan` and `/run-film-ai-planning` only ever touch Notion planning rows, and `gatherFilmAISummary()` always reports `privacyGateCleared: false`. Tasks 1 (Upload) and 7 (Database Save) in the seeded roadmap carry this as an explicit blocker note. Treat "start building the real CV pipeline against real clips" as gated behind a founder decision, not an engineering one.
 
+## Step 9 — Coach Sales CRM Agent
+
+Tracks coach/school/club leads for the Adaptiv launch plan (soft outreach to 10-15 Phoenix-area coaches, onboard 2-3 beta coaches, close 5+ paid coach accounts). **Every safety rule below is enforced in code, not just documented** — see `SAFETY_RULES` and the property-builder functions in `lib/coachSalesAgent.js`.
+
+- Do not send emails automatically.
+- Do not send texts automatically.
+- Do not DM anyone automatically.
+- Do not mark a deal as Won automatically.
+- All external outreach requires approval.
+- Create drafts, tasks, and recommendations only.
+- Never include private student-athlete data in outreach.
+- Rank leads by likelihood to convert and strategic value.
+
+### Step 9A — Notion database fields
+
+Already set up on the **Coach CRM** database:
+
+| Property | Type |
+|---|---|
+| Lead Name | Title |
+| School / Program | Text |
+| Sport | Select (Volleyball, Football, Basketball, Soccer, Baseball/Softball, Track & Field, All Sports, Other) |
+| Role | Select (Head Coach, Assistant Coach, Athletic Director, Club Director, Trainer, Parent Organizer, Other) |
+| Email | Email |
+| Phone | Phone |
+| Source | Select (Founder/Referral, Cold Outreach, Inbound, Event, Instagram, Other) |
+| Stage | Select (New Lead, Researching, Contacted, Interested, Demo Scheduled, Beta Access Offered, Trial Active, Proposal Sent, Won, Lost, Dormant) |
+| Priority | Select (High, Medium, Low) |
+| Last Contact | Date |
+| Next Follow-Up | Date |
+| Objection | Text |
+| Notes | Text |
+| Estimated Value | Number |
+| Approved Outreach | Checkbox |
+
+Already set up on the **Coach Outreach** database:
+
+| Property | Type |
+|---|---|
+| Message | Title |
+| Lead | Relation → Coach CRM |
+| Channel | Select (Email, Instagram DM, Text, Phone Call, In Person, LinkedIn) |
+| Status | Select (Draft, Needs Approval, Approved, Sent, Replied, Follow-Up Needed, Closed) |
+| Draft | Text |
+| Approved | Checkbox |
+| Sent Date | Date |
+| Follow-Up Date | Date |
+
+The **Agent Reports** database (already active as of Step 8) gets "Coach Sales Agent" added as a new Agent option automatically the first time `/run-coach-sales-review` files a report.
+
+### Step 9B — Railway environment variables
+
+On the `adaptiv-automation-hub` Railway service, set:
+```
+NOTION_DATABASE_COACH_CRM=
+NOTION_DATABASE_COACH_OUTREACH=
+```
+Both are safe to store as plain env vars — there's no new secret in Step 9 beyond the existing `NOTION_API_KEY`. `NOTION_DATABASE_COACH_CRM` is required by `/add-coach-lead`; `/draft-coach-outreach` also needs `NOTION_DATABASE_COACH_OUTREACH`; `/run-coach-sales-review` also needs `NOTION_DATABASE_AGENT_REPORTS` (already set from Step 8B).
+
+### Step 9C — Lead scoring formula
+
+```
+Athletic Director            +25
+Head Coach                   +20
+Phoenix/Tempe area           +20
+Volleyball                   +15
+Known relationship/referral  +25
+Interested/replied           +30
+Demo scheduled                +40
+Trial active                  +50
+School/team budget likely    +20
+No response after 3 touches  -20
+Lost                        -100
+```
+Implemented in `computeLeadScore()` in `lib/coachSalesAgent.js`. Returned as `leadScore` (a number) and `leadScoreReasons` (a human-readable breakdown) from `/add-coach-lead`, and used to rank `topLeads` in `/run-coach-sales-review`.
+
+### Step 9D — Test with one fake lead
+
+After deploying with the Step 9B variables set:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/add-coach-lead \
+  -H "Content-Type: application/json" \
+  -d '{
+    "leadName": "Test Coach",
+    "schoolProgram": "Phoenix Test High School",
+    "role": "Head Coach",
+    "sport": "Volleyball",
+    "source": "Founder/Referral",
+    "stage": "New Lead",
+    "estimatedValue": 99
+  }'
+```
+Expected: a new row in Notion → Coach CRM with `Approved Outreach` unchecked, and a JSON response with `leadScore: 100` (Head Coach +20, Phoenix/Tempe area +20, Volleyball +15, Founder/Referral +25, budget likely +20). Copy the returned `leadPageId` for Step 9E.
+
+### Step 9E — Test an outreach draft
+
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/draft-coach-outreach \
+  -H "Content-Type: application/json" \
+  -d '{
+    "leadPageId": "<leadPageId from Step 9D>",
+    "leadName": "Test Coach",
+    "schoolProgram": "Phoenix Test High School",
+    "role": "Head Coach",
+    "channel": "Email",
+    "context": "Met at the Phoenix volleyball coaches clinic."
+  }'
+```
+Expected: a new row in Notion → Coach Outreach with `Status: Needs Approval` and `Approved` unchecked, linked to the Test Coach lead. The JSON response's `draftText` is short, coach-friendly, mentions Adaptiv as an app + training system, includes one call to action (a 15-minute call), and never claims guaranteed results. **Nothing is sent** — review, edit if needed, and send it yourself from Notion.
+
+Then:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-coach-sales-review
+```
+Expected: a new row in Notion → Agent Reports summarizing the pipeline, and the JSON response includes `coachSalesStatus`, `topLeads` (Test Coach should rank first), and `target` (first-sales progress).
+
+Then:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+```
+Expected: the Daily Brief now includes a "Coach Sales" section showing the pipeline status and top-ranked leads.
+
+### Step 9F — Daily Brief Coach Sales section
+
+`/run-full-brief` now includes (when `NOTION_DATABASE_COACH_CRM` is set):
+```
+## Coach Sales
+Status: Green / Yellow / Red
+Pipeline: X total leads / Y active / Z won / W lost
+First sales target progress: X/25 leads, Y/10 outreach drafts, Z/3 conversations, W/1 demo booked
+Top Ranked Leads: -
+Outreach drafts awaiting approval: -
+```
+Status rules (`gatherCoachSalesSummary()` in `lib/coachSalesAgent.js`):
+- **Red** — no leads yet.
+- **Yellow** — leads exist, but nothing has an outreach draft and an active conversation yet.
+- **Green** — at least one outreach draft on file and at least one lead in an active-conversation stage (Contacted or later).
+
+### Step 9G — First real sales target
+
+The launch goal this phase tracks toward: **25 leads, 10 outreach drafts, 3 conversations, 1 demo booked.** Progress against this target (`FIRST_SALES_TARGET` in `lib/coachSalesAgent.js`) is returned by `/run-coach-sales-review` and shown in the Daily Brief's Coach Sales section. Nothing in this service auto-advances a lead toward this target — every stage change, outreach send, and Won marking is a manual step a human takes in Notion.
+
+### Step 9H — Safety rules recap
+
+**This agent never contacts anyone and never closes a deal.** `buildCoachLeadProperties()` always writes `Approved Outreach: false`; `buildOutreachDraftProperties()` always writes `Status: "Needs Approval"` and `Approved: false`; `validateLeadInput()` rejects any request that tries to set `Stage: "Won"`; `validateOutreachInput()` rejects any request containing an athlete-specific field. No code path in `lib/coachSalesAgent.js` or its three routes can bypass any of these — they're structural, not just documented in this README.
+
 ## Deploying to Railway
 
 1. **Push this folder to GitHub.**
@@ -810,7 +992,7 @@ None of this is built yet, and nothing in this codebase has a path to bypass it 
 2. **Connect the repo to Railway.**
    In the Railway dashboard, open the `adaptiv-automation-hub` service (already created) → Settings → Source → Connect Repo → select this new GitHub repo.
 3. **Environment variables.**
-   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, and `NOTION_DATABASE_FILM_AI_ROADMAP` / `NOTION_DATABASE_AGENT_REPORTS` per Step 8B, if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
+   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, `NOTION_DATABASE_FILM_AI_ROADMAP` / `NOTION_DATABASE_AGENT_REPORTS` per Step 8B, and `NOTION_DATABASE_COACH_CRM` / `NOTION_DATABASE_COACH_OUTREACH` per Step 9B, if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
 4. **Deploy.**
    Railway will build and deploy automatically once the repo is connected. Watch the Deployments tab for build success.
 5. **Get the public URL.**
@@ -829,6 +1011,8 @@ None of this is built yet, and nothing in this codebase has a path to bypass it 
 - Google Doc "create or update" is keyed on exact title match (`Adaptiv Daily CEO Brief - YYYY-MM-DD`). Running `/run-full-brief` more than once on the same day updates that same doc rather than creating a duplicate; running it on the next calendar day creates a new one.
 - If the final Notion write-back (saving Google Doc URL / Email Sent / Delivery Status / SMS Sent / SMS Status onto the Daily Brief row) fails after the doc/email/SMS already succeeded, that's logged to Railway logs but there's no automatic retry yet — a manual re-check of that day's Notion row covers it for now.
 - The Product/Bug Agent's "Product / Bug Agent" Daily Brief section isn't folded into the Google Doc or SMS text yet — it's in the Notion brief and in `/run-full-brief`'s JSON response (`productBugSummary`) for now. Extending `googleDeliveryAgent.js`/`smsDeliveryAgent.js` to include it is a small follow-up if wanted.
-- SMS delivery (Step 6), the Product/Bug Agent (Step 7), and the Film AI Build Team planning phase (Step 8) are all done. The Coach Sales CRM Agent (Step 9) is the next planned phase, prioritized ahead of social automation since the launch plan targets coach outreach, beta coaches, and getting 5+ paid coach accounts.
+- SMS delivery (Step 6), the Product/Bug Agent (Step 7), the Film AI Build Team planning phase (Step 8), and the Coach Sales CRM Agent (Step 9) are all done. Social Media Agents (Instagram/TikTok/YouTube/X — Step 10) are the next planned phase.
 - The Film AI Build Team is planning-only by design (Step 8H). Building the actual computer vision pipeline, uploading real athlete video, or connecting to production user data is explicitly out of scope until the privacy gate (review, consent, deletion policy, secure storage plan) is cleared — that's a founder decision, not something to build around.
 - The Film AI Build Team's "Film AI Build Team" Daily Brief section isn't folded into the Google Doc or SMS text yet either, same as the Product/Bug Agent section — it's in the Notion brief and in `/run-full-brief`'s JSON response (`filmAISummary`) for now.
+- The Coach Sales CRM Agent never contacts a coach and never marks a deal Won — every outreach send and every stage change to Won is a manual step a human takes in Notion (Step 9H). The "Coach Sales" Daily Brief section isn't folded into the Google Doc or SMS text yet either — it's in the Notion brief and in `/run-full-brief`'s JSON response (`coachSalesSummary`) for now.
+- Coach Sales progress against the first-sales target (25 leads / 10 outreach drafts / 3 conversations / 1 demo booked — Step 9G) should be checked periodically via `/run-coach-sales-review` or the Daily Brief; nothing auto-notifies when the target is hit.

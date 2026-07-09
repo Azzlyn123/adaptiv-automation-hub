@@ -31,6 +31,12 @@
 //     computer vision, never touches real athlete video, never deploys
 //     anything. Can fold a live Film AI roadmap summary into the Daily
 //     Brief (see Step 8 in lib/filmAIPlanningAgent.js).
+//   - Coach Sales CRM Agent (Step 9): tracks coach/school/club leads,
+//     scores and ranks them, and drafts (never sends) approval-gated
+//     outreach copy. Can fold a live Coach Sales pipeline summary into the
+//     Daily Brief. Never sends an email/text/DM, never marks a deal Won,
+//     never includes student-athlete data in outreach — all enforced in
+//     lib/coachSalesAgent.js, not just documented (see Step 9).
 // Still NOT in scope:
 //   - Social channels
 //   - Anything that writes to Stripe (read-only: no charges, no refunds,
@@ -43,6 +49,10 @@
 //     athlete video (Film AI Build Team only creates/reads Notion planning
 //     rows — see Step 8H privacy gate in lib/filmAIPlanningAgent.js)
 //   - Emailing anyone other than FOUNDER_EMAIL
+//   - Sending any outreach to a coach/lead (email, text, DM) or marking a
+//     coach-sales deal Won — Coach Sales Agent only creates drafts, tasks,
+//     and recommendations; a human approves and sends everything manually
+//     (see SAFETY_RULES in lib/coachSalesAgent.js)
 
 require('dotenv').config();
 
@@ -55,6 +65,7 @@ const googleDeliveryAgent = require('./lib/googleDeliveryAgent');
 const smsDeliveryAgent = require('./lib/smsDeliveryAgent');
 const productBugAgent = require('./lib/productBugAgent');
 const filmAIPlanningAgent = require('./lib/filmAIPlanningAgent');
+const coachSalesAgent = require('./lib/coachSalesAgent');
 
 const app = express();
 app.use(express.json());
@@ -116,11 +127,27 @@ const FILM_AI_PLANNING_REQUIRED_ENV_VARS = [
   'NOTION_DATABASE_AGENT_REPORTS',
 ];
 
-// Deliberately does NOT include the Step 7 or Step 8 vars — the Product/Bug
-// and Film AI sections of /run-full-brief are both additive (see the
-// productBugSummary and filmAISummary blocks in that route), so a full
-// brief still runs even before those Notion databases are wired up in
-// Railway.
+// Step 9: Coach Sales CRM Agent. NOTION_DATABASE_AGENT_REPORTS is
+// deliberately NOT required for /add-coach-lead or /draft-coach-outreach —
+// only /run-coach-sales-review files an Agent Reports row.
+const COACH_SALES_ADD_LEAD_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_COACH_CRM'];
+const COACH_SALES_OUTREACH_REQUIRED_ENV_VARS = [
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_COACH_CRM',
+  'NOTION_DATABASE_COACH_OUTREACH',
+];
+const COACH_SALES_REVIEW_REQUIRED_ENV_VARS = [
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_COACH_CRM',
+  'NOTION_DATABASE_COACH_OUTREACH',
+  'NOTION_DATABASE_AGENT_REPORTS',
+];
+
+// Deliberately does NOT include the Step 7, Step 8, or Step 9 vars — the
+// Product/Bug, Film AI, and Coach Sales sections of /run-full-brief are all
+// additive (see the productBugSummary, filmAISummary, and coachSalesSummary
+// blocks in that route), so a full brief still runs even before those
+// Notion databases are wired up in Railway.
 const FULL_BRIEF_REQUIRED_ENV_VARS = [
   ...new Set([
     ...DAILY_BRIEF_REQUIRED_ENV_VARS,
@@ -507,6 +534,150 @@ app.post('/run-film-ai-planning', async (req, res) => {
   }
 });
 
+// POST /add-coach-lead
+// Step 9. Records one coach/school/club lead into the Notion Coach CRM
+// database. Stage defaults to "New Lead" and Approved Outreach is always
+// written as false — this route can never mark a deal Won or pre-approve
+// outreach (see SAFETY_RULES in lib/coachSalesAgent.js). Returns the
+// computed lead score alongside the created page.
+app.post('/add-coach-lead', async (req, res) => {
+  const missing = getMissingEnvVars(COACH_SALES_ADD_LEAD_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  const validation = coachSalesAgent.validateLeadInput(req.body);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Invalid coach lead submission', details: validation.errors });
+  }
+
+  const { score, reasons } = coachSalesAgent.computeLeadScore({
+    role: validation.normalized.role,
+    schoolProgram: validation.normalized.schoolProgram,
+    sport: validation.normalized.sport,
+    source: validation.normalized.source,
+    stage: validation.normalized.stage,
+    budgetLikely: typeof validation.normalized.estimatedValue === 'number' && validation.normalized.estimatedValue > 0,
+  });
+
+  try {
+    const leadPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_COACH_CRM },
+      properties: coachSalesAgent.buildCoachLeadProperties(validation.normalized),
+    });
+
+    return res.status(201).json({
+      status: 'ok',
+      message: 'Coach lead recorded in Coach CRM. Approved Outreach starts false — no outreach is pre-approved.',
+      leadPageUrl: leadPage.url,
+      leadPageId: leadPage.id,
+      leadScore: score,
+      leadScoreReasons: reasons,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
+// POST /draft-coach-outreach
+// Step 9. Generates a short, coach-friendly outreach draft (deterministic
+// template — never claims guaranteed results, never mentions student-athlete
+// data) and files it into the Notion Coach Outreach database. Status is
+// always written as "Needs Approval" and Approved is always false — this
+// route can never send, DM, text, or email anyone (see SAFETY_RULES in
+// lib/coachSalesAgent.js). A human must review and approve the draft
+// directly in Notion before any outreach happens.
+app.post('/draft-coach-outreach', async (req, res) => {
+  const missing = getMissingEnvVars(COACH_SALES_OUTREACH_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  const validation = coachSalesAgent.validateOutreachInput(req.body);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Invalid outreach draft request', details: validation.errors });
+  }
+
+  const draftText = coachSalesAgent.generateOutreachDraft(validation.normalized);
+
+  try {
+    const draftPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_COACH_OUTREACH },
+      properties: coachSalesAgent.buildOutreachDraftProperties({
+        ...validation.normalized,
+        draftText,
+      }),
+    });
+
+    return res.status(201).json({
+      status: 'ok',
+      message: 'Outreach draft filed in Coach Outreach as "Needs Approval". Nothing was sent — approve it in Notion first.',
+      draftPageUrl: draftPage.url,
+      draftText,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
+// POST /run-coach-sales-review
+// Step 9. Read-only report: queries Coach CRM (+ Coach Outreach), scores and
+// ranks every lead, rolls the pipeline up into a Green/Yellow/Red status
+// against the first-sales target (25 leads / 10 outreach drafts /
+// 3 conversations / 1 demo booked), and files one summary row into the
+// Notion Agent Reports database. Never creates or edits a lead or an
+// outreach draft — use /add-coach-lead and /draft-coach-outreach for that.
+app.post('/run-coach-sales-review', async (req, res) => {
+  const missing = getMissingEnvVars(COACH_SALES_REVIEW_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    const summary = await coachSalesAgent.gatherCoachSalesSummary(notion, {
+      crmDbId: process.env.NOTION_DATABASE_COACH_CRM,
+      outreachDbId: process.env.NOTION_DATABASE_COACH_OUTREACH,
+    });
+
+    const reportText = coachSalesAgent.buildCoachSalesReportSummary(summary);
+    const reportPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_AGENT_REPORTS },
+      properties: filmAIPlanningAgent.buildAgentReportProperties({
+        agent: 'Coach Sales Agent',
+        summary: reportText,
+      }),
+    });
+
+    return res.status(201).json({
+      status: 'ok',
+      message: 'Coach Sales review complete. Read-only — no leads or outreach drafts were created or changed.',
+      coachSalesStatus: summary.status,
+      totalLeads: summary.totalLeads,
+      activeLeadCount: summary.activeLeadCount,
+      conversationCount: summary.conversationCount,
+      demoCount: summary.demoCount,
+      wonCount: summary.wonCount,
+      lostCount: summary.lostCount,
+      outreachDraftCount: summary.outreachDraftCount,
+      outreachNeedsApprovalCount: summary.outreachNeedsApprovalCount,
+      topLeads: summary.topLeads,
+      target: summary.target,
+      reportPageUrl: reportPage.url,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
 // POST /run-full-brief
 // Runs the Stripe revenue sync and the Railway health check (each writing
 // their own Sales/Railway Health rows and any Approval items), then creates
@@ -575,6 +746,23 @@ app.post('/run-full-brief', async (req, res) => {
     }
   }
 
+  // Step 9: Coach Sales pipeline summary. Additive like the Product/Bug and
+  // Film AI summaries above — a missing NOTION_DATABASE_COACH_CRM or a
+  // Notion read failure here never blocks the rest of the brief. Read-only:
+  // this never creates/changes a lead or an outreach draft (that only
+  // happens from /add-coach-lead and /draft-coach-outreach).
+  let coachSalesSummary = null;
+  if (getMissingEnvVars(COACH_SALES_ADD_LEAD_REQUIRED_ENV_VARS).length === 0) {
+    try {
+      coachSalesSummary = await coachSalesAgent.gatherCoachSalesSummary(notion, {
+        crmDbId: process.env.NOTION_DATABASE_COACH_CRM,
+        outreachDbId: process.env.NOTION_DATABASE_COACH_OUTREACH,
+      });
+    } catch (err) {
+      console.error('[coach sales agent] Failed to gather summary for daily brief (non-fatal):', err.body || err.message || err);
+    }
+  }
+
   try {
     const { salesPage, approvalPage } = await writeRevenueRecords(metrics);
     const { healthPage, approvalPages, approvalDrafts } = await writeRailwayHealthRecords(health);
@@ -585,6 +773,7 @@ app.post('/run-full-brief', async (req, res) => {
       railwayApprovals: approvalDrafts,
       productBugSummary,
       filmAISummary,
+      coachSalesSummary,
     });
     const briefPage = await notion.pages.create({
       parent: { database_id: process.env.NOTION_DATABASE_DAILY_BRIEFS },
@@ -647,6 +836,7 @@ app.post('/run-full-brief', async (req, res) => {
       railwayApprovalsCreated: approvalPages.map((p) => p.url),
       productBugSummary,
       filmAISummary,
+      coachSalesSummary,
       dailyBriefUrl: briefPage.url,
       delivery,
       sms,
@@ -924,7 +1114,14 @@ async function writeBugRecords(bug) {
 // called with { railwayHealth, railwayApprovals }, it swaps in a real
 // Railway Health section and drops the Railway placeholder line too — both
 // used by /run-full-brief.
-function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals, productBugSummary, filmAISummary } = {}) {
+function buildDailyBriefContent({
+  salesMetrics,
+  railwayHealth,
+  railwayApprovals,
+  productBugSummary,
+  filmAISummary,
+  coachSalesSummary,
+} = {}) {
   const today = new Date();
   const dateLabel = today.toISOString().split('T')[0]; // YYYY-MM-DD
   const displayDate = today.toLocaleDateString('en-US', {
@@ -939,10 +1136,7 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals,
     'Confirm daily brief format with founder',
   ];
 
-  const missingDataSources = [
-    'Social channels (Instagram, TikTok, YouTube, X — not connected)',
-    'Coach/school sales pipeline data',
-  ];
+  const missingDataSources = ['Social channels (Instagram, TikTok, YouTube, X — not connected)'];
   if (!railwayHealth) {
     missingDataSources.splice(1, 0, 'Railway health metrics (not wired up in this test run)');
   }
@@ -954,6 +1148,9 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals,
   }
   if (!filmAISummary) {
     missingDataSources.push('Film AI Build Team (Notion Film AI Roadmap not wired up yet)');
+  }
+  if (!coachSalesSummary) {
+    missingDataSources.push('Coach Sales Agent (Notion Coach CRM / Coach Outreach not wired up yet)');
   }
 
   const founderTodos = [
@@ -1008,6 +1205,10 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals,
     bodyBlocks.push(...filmAIPlanningAgent.buildFilmAISummaryBlocks(filmAISummary));
   }
 
+  if (coachSalesSummary) {
+    bodyBlocks.push(...coachSalesAgent.buildCoachSalesSummaryBlocks(coachSalesSummary));
+  }
+
   bodyBlocks.push(
     heading('Top 3 Priorities'),
     numberedList(topPriorities),
@@ -1048,6 +1249,7 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals,
     approvalRequests,
     productBugSummary: productBugSummary || null,
     filmAISummary: filmAISummary || null,
+    coachSalesSummary: coachSalesSummary || null,
   };
 }
 
