@@ -977,6 +977,178 @@ The launch goal this phase tracks toward: **25 leads, 10 outreach drafts, 3 conv
 
 **This agent never contacts anyone and never closes a deal.** `buildCoachLeadProperties()` always writes `Approved Outreach: false`; `buildOutreachDraftProperties()` always writes `Status: "Needs Approval"` and `Approved: false`; `validateLeadInput()` rejects any request that tries to set `Stage: "Won"`; `validateOutreachInput()` rejects any request containing an athlete-specific field. No code path in `lib/coachSalesAgent.js` or its three routes can bypass any of these — they're structural, not just documented in this README.
 
+## Step 10 — Social Media Agent
+
+Tracks posted content performance (Social Metrics), incoming comments/DMs/mentions (Social Inbox), a content idea backlog (Social Ideas), and a content calendar (Content Calendar). Drafts — but never posts, publishes, schedules, or sends — content and replies for a human to review and approve. **Every safety rule below is enforced in code, not just documented** — see `SAFETY_RULES` and the property-builder functions in `lib/socialMediaAgent.js`.
+
+- Never post, publish, or schedule content automatically.
+- Never reply to a comment, DM, or mention automatically.
+- Never delete, hide, or moderate a comment automatically.
+- Never follow, unfollow, like, or otherwise act on another account.
+- All outbound content (captions, replies, posts) requires manual human approval and manual publishing.
+- Create drafts, ideas, tasks, and reports only.
+- Never fabricate engagement numbers.
+
+**Social posting stays fully manual for now.** Step 10 only tracks, drafts, and reports — nothing in this service (or the planned Step 11, Approval-Based Actions) is expected to post on your behalf without a further, explicit decision to build that.
+
+### Step 10A — Notion database fields
+
+Already set up on the **Social Metrics** database:
+
+| Property | Type |
+|---|---|
+| Post | Title |
+| Platform | Select (Instagram, TikTok, YouTube, X) |
+| Date Posted | Date |
+| URL | URL |
+| Views | Number |
+| Likes | Number |
+| Comments | Number |
+| Shares | Number |
+| Saves | Number |
+| Watch Time | Number |
+| Engagement Rate | Number |
+| Notes | Text |
+
+Already set up on the **Content Calendar** database:
+
+| Property | Type |
+|---|---|
+| Content Title | Title |
+| Platform | Select (Instagram, TikTok, YouTube, X) |
+| Status | Select (Idea, Draft, Needs Approval, Approved, Posted, Repurpose, Rejected) |
+| Content Type | Select (Founder Story, Training Tip, Coach Tool, Film AI Demo, Athlete Result, App Demo, Behind the Scenes, Testimonial, Launch Post) |
+| Hook | Text |
+| Caption | Text |
+| CTA | Text |
+| Owner | Text |
+| Publish Date | Date |
+| Approved | Checkbox |
+
+Already set up on the **Social Inbox** database:
+
+| Property | Type |
+|---|---|
+| Message/Comment | Title |
+| Platform | Select (Instagram, TikTok, YouTube, X) |
+| User | Text |
+| URL | URL |
+| Sentiment | Select (Positive, Neutral, Negative, Lead, Support Issue, Spam) |
+| Needs Reply | Checkbox |
+| Draft Reply | Text |
+| Approved | Checkbox |
+| Status | Select (New, Needs Approval, Approved, Replied, Ignore) |
+
+Already set up on the **Social Ideas** database (read-only in this service — backlog count only, no route writes to it):
+
+| Property | Type |
+|---|---|
+| Idea | Title |
+| Platform | Select (Instagram, TikTok, YouTube, X, Any) |
+| Content Type | Select (same 9 options as Content Calendar) |
+| Status | Select (New, Considering, Approved for Calendar, Rejected) |
+| Notes | Text |
+| Date Added | Date |
+
+The **Agent Reports** database (already active as of Step 8) gets "Social Media Agent" added as a new Agent option automatically the first time `/run-social-review` files a report.
+
+### Step 10B — Railway environment variables
+
+On the `adaptiv-automation-hub` Railway service, set:
+```
+NOTION_DATABASE_SOCIAL_METRICS=
+NOTION_DATABASE_CONTENT_CALENDAR=
+NOTION_DATABASE_SOCIAL_INBOX=
+NOTION_DATABASE_SOCIAL_IDEAS=
+```
+All four are safe to store as plain env vars — there's no new secret in Step 10 beyond the existing `NOTION_API_KEY`. `NOTION_DATABASE_SOCIAL_METRICS` is required by `/add-social-post`; `NOTION_DATABASE_SOCIAL_INBOX` is required by `/add-social-comment`; `NOTION_DATABASE_CONTENT_CALENDAR` is required by `/draft-social-content`; `/run-social-review` needs all three plus `NOTION_DATABASE_AGENT_REPORTS` (already set from Step 8B). `NOTION_DATABASE_SOCIAL_IDEAS` is additive everywhere — it only adds a backlog count when set.
+
+Deferred (Layer 2 — do not set yet): `YOUTUBE_API_KEY` / `YOUTUBE_CHANNEL_ID`, `TIKTOK_ACCESS_TOKEN`, `X_API_KEY` / `X_API_SECRET` / `X_ACCESS_TOKEN` / `X_ACCESS_SECRET`, `META_ACCESS_TOKEN` / `META_INSTAGRAM_BUSINESS_ACCOUNT_ID`. These aren't wired into any route yet — Layer 1 (manual entry via the routes below) is what's live today. When Layer 2 is built, the same Notion schema and the same safety rules still apply; only the data source changes from manual entry to a live API pull.
+
+### Step 10C — Two-layer build
+
+- **Layer 1 (built now, works today):** the founder/team manually posts content on each platform, then records it with `/add-social-post`; manually checks each platform's comments/DMs and logs anything noteworthy with `/add-social-comment`; and uses `/draft-social-content` to generate a caption/hook/CTA draft to review before posting by hand.
+- **Layer 2 (future, not built yet):** once a platform's API credentials are wired up, the same three write routes and the same Notion schema continue to work — the only change is that posting data and comments could be pulled automatically instead of typed in manually. Posting, replying, and moderating stay manual (or become an explicit, separately-approved Step 11 feature) regardless of which layer is active.
+
+### Step 10D — Engagement scoring
+
+```
+Engagement Rate = (Likes + Comments + Shares + Saves) / Views
+```
+Implemented in `computeEngagementRate()` in `lib/socialMediaAgent.js`, stored as a percentage (e.g. `11.33` = 11.33%). Returns `null` (not `0`) when `Views` is missing or zero, so a post with no view data yet doesn't show a misleading 0% rate.
+
+### Step 10E — Test with one fake post
+
+After deploying with the Step 10B variables set:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/add-social-post \
+  -H "Content-Type: application/json" \
+  -d '{
+    "postTitle": "Founder story test reel",
+    "platform": "TikTok",
+    "datePosted": "2026-07-08",
+    "views": 1200,
+    "likes": 110,
+    "comments": 14,
+    "shares": 9,
+    "saves": 6
+  }'
+```
+Expected: a new row in Notion → Social Metrics with `Engagement Rate` computed as `(110+14+9+6)/1200 = 11.58%`, and a JSON response with `engagementRate: 11.58`.
+
+Then:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-social-review
+```
+Expected: a new row in Notion → Agent Reports summarizing content/inbox/calendar status, and the JSON response includes `socialMediaStatus` and `topPosts` (the test reel should appear).
+
+Then:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+```
+Expected: the Daily Brief now includes a "Social Media" section showing the tracked post and current status. Confirm nothing was posted, replied to, or scheduled anywhere — only Notion rows were created.
+
+### Step 10F — Daily Brief Social Media section
+
+`/run-full-brief` now includes (when `NOTION_DATABASE_SOCIAL_METRICS` / `NOTION_DATABASE_CONTENT_CALENDAR` / `NOTION_DATABASE_SOCIAL_INBOX` are all set):
+```
+## Social Media
+Status: Green / Yellow / Red
+Posts tracked: X / Total views: Y / Avg engagement rate: Z%
+Top Performing Posts: -
+Content Calendar: X total — Y approved/upcoming, Z awaiting approval.
+Social Inbox: X total — Y need a reply (Z leads, W negative), V draft reply(ies) awaiting approval.
+Idea backlog: X idea(s) not yet queued into the calendar.
+```
+Status rules (`gatherSocialMediaSummary()` in `lib/socialMediaAgent.js`):
+- **Red** — nothing tracked yet (no Social Metrics rows and no Content Calendar rows at all).
+- **Yellow** — some activity exists, but there's a gap: either nothing is Approved/queued in the calendar, or the inbox has 5+ items needing a reply.
+- **Green** — at least one post is being tracked, at least one piece of content is Approved in the calendar, and the inbox reply backlog is under 5.
+
+### Step 10G — Weekly content rhythm (informational only)
+
+A reasonable cadence to aim for once this is in regular use — not enforced by any code, just a suggested rhythm for the founder/team:
+- A few times a week: post content on the platform(s) that fit, then log it with `/add-social-post`.
+- Daily or every other day: check each platform's comments/DMs, log anything noteworthy with `/add-social-comment`, and review/approve any generated draft replies before sending manually.
+- Weekly: review the Social Ideas backlog, pull ideas into the Content Calendar, and use `/draft-social-content` to get a starting caption for anything coming up.
+- Weekly or before a sales/investor update: run `/run-social-review` to get a fresh status snapshot.
+
+### Step 10H — What this does and doesn't automate
+
+**Only automates (Layer 1, live today):**
+- Recording posted-content performance data you provide (`/add-social-post`).
+- Recording comments/DMs/mentions you provide, optionally with a drafted reply for your review (`/add-social-comment`).
+- Drafting new content (hook/caption/CTA) for your review (`/draft-social-content`).
+- Reading back a status report across all four databases (`/run-social-review`).
+- Folding a live Social Media summary into the Daily Brief.
+
+**Does NOT automate (not built, and not planned without a separate, explicit decision):**
+- Posting, publishing, or scheduling anything on Instagram, TikTok, YouTube, or X.
+- Replying to, deleting, or moderating any comment, DM, or mention.
+- Following, unfollowing, liking, or any other account-level action on any platform.
+- Pulling live engagement data automatically (Layer 2 — deferred until a platform API is wired up, and even then, posting/replying stays manual or becomes its own approved feature).
+- Generating images, video, or any other media asset — content drafts are text only (hook/caption/CTA).
+
 ## Deploying to Railway
 
 1. **Push this folder to GitHub.**
@@ -992,7 +1164,7 @@ The launch goal this phase tracks toward: **25 leads, 10 outreach drafts, 3 conv
 2. **Connect the repo to Railway.**
    In the Railway dashboard, open the `adaptiv-automation-hub` service (already created) → Settings → Source → Connect Repo → select this new GitHub repo.
 3. **Environment variables.**
-   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, `NOTION_DATABASE_FILM_AI_ROADMAP` / `NOTION_DATABASE_AGENT_REPORTS` per Step 8B, and `NOTION_DATABASE_COACH_CRM` / `NOTION_DATABASE_COACH_OUTREACH` per Step 9B, if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
+   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, `NOTION_DATABASE_FILM_AI_ROADMAP` / `NOTION_DATABASE_AGENT_REPORTS` per Step 8B, `NOTION_DATABASE_COACH_CRM` / `NOTION_DATABASE_COACH_OUTREACH` per Step 9B, and `NOTION_DATABASE_SOCIAL_METRICS` / `NOTION_DATABASE_CONTENT_CALENDAR` / `NOTION_DATABASE_SOCIAL_INBOX` / `NOTION_DATABASE_SOCIAL_IDEAS` per Step 10B, if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
 4. **Deploy.**
    Railway will build and deploy automatically once the repo is connected. Watch the Deployments tab for build success.
 5. **Get the public URL.**
@@ -1011,8 +1183,10 @@ The launch goal this phase tracks toward: **25 leads, 10 outreach drafts, 3 conv
 - Google Doc "create or update" is keyed on exact title match (`Adaptiv Daily CEO Brief - YYYY-MM-DD`). Running `/run-full-brief` more than once on the same day updates that same doc rather than creating a duplicate; running it on the next calendar day creates a new one.
 - If the final Notion write-back (saving Google Doc URL / Email Sent / Delivery Status / SMS Sent / SMS Status onto the Daily Brief row) fails after the doc/email/SMS already succeeded, that's logged to Railway logs but there's no automatic retry yet — a manual re-check of that day's Notion row covers it for now.
 - The Product/Bug Agent's "Product / Bug Agent" Daily Brief section isn't folded into the Google Doc or SMS text yet — it's in the Notion brief and in `/run-full-brief`'s JSON response (`productBugSummary`) for now. Extending `googleDeliveryAgent.js`/`smsDeliveryAgent.js` to include it is a small follow-up if wanted.
-- SMS delivery (Step 6), the Product/Bug Agent (Step 7), the Film AI Build Team planning phase (Step 8), and the Coach Sales CRM Agent (Step 9) are all done. Social Media Agents (Instagram/TikTok/YouTube/X — Step 10) are the next planned phase.
+- SMS delivery (Step 6), the Product/Bug Agent (Step 7), the Film AI Build Team planning phase (Step 8), the Coach Sales CRM Agent (Step 9), and the Social Media Agent (Step 10) are all done. Approval-Based Actions (Step 11) is the next planned phase — not started yet, and social posting stays fully manual until then (and likely after, per a separate explicit decision).
 - The Film AI Build Team is planning-only by design (Step 8H). Building the actual computer vision pipeline, uploading real athlete video, or connecting to production user data is explicitly out of scope until the privacy gate (review, consent, deletion policy, secure storage plan) is cleared — that's a founder decision, not something to build around.
 - The Film AI Build Team's "Film AI Build Team" Daily Brief section isn't folded into the Google Doc or SMS text yet either, same as the Product/Bug Agent section — it's in the Notion brief and in `/run-full-brief`'s JSON response (`filmAISummary`) for now.
 - The Coach Sales CRM Agent never contacts a coach and never marks a deal Won — every outreach send and every stage change to Won is a manual step a human takes in Notion (Step 9H). The "Coach Sales" Daily Brief section isn't folded into the Google Doc or SMS text yet either — it's in the Notion brief and in `/run-full-brief`'s JSON response (`coachSalesSummary`) for now.
 - Coach Sales progress against the first-sales target (25 leads / 10 outreach drafts / 3 conversations / 1 demo booked — Step 9G) should be checked periodically via `/run-coach-sales-review` or the Daily Brief; nothing auto-notifies when the target is hit.
+- The Social Media Agent never posts, replies, deletes, or moderates anything on any platform (Step 10H) — every draft it creates is filed as "Needs Approval" with `Approved: false`, and posting/replying/moderating stays a manual step a human takes directly on each platform. The "Social Media" Daily Brief section isn't folded into the Google Doc or SMS text yet either, same as the other Step 7-9 sections — it's in the Notion brief and in `/run-full-brief`'s JSON response (`socialMediaSummary`) for now.
+- Social Ideas (`NOTION_DATABASE_SOCIAL_IDEAS`) is currently populated manually — no route in this service writes new ideas into it yet. `/run-social-review` and `/run-full-brief` only read its backlog count.

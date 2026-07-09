@@ -37,8 +37,15 @@
 //     Daily Brief. Never sends an email/text/DM, never marks a deal Won,
 //     never includes student-athlete data in outreach — all enforced in
 //     lib/coachSalesAgent.js, not just documented (see Step 9).
+//   - Social Media Agent (Step 10): tracks posted content performance
+//     (Social Metrics), incoming comments/DMs/mentions (Social Inbox), a
+//     content idea backlog (Social Ideas), and a content calendar (Content
+//     Calendar). Drafts (never posts) content and replies for manual
+//     approval. Can fold a live Social Media summary into the Daily Brief.
+//     Never posts, publishes, schedules, replies, deletes, or moderates
+//     anything automatically — all enforced in lib/socialMediaAgent.js, not
+//     just documented (see Step 10).
 // Still NOT in scope:
-//   - Social channels
 //   - Anything that writes to Stripe (read-only: no charges, no refunds,
 //     no subscription cancellations, no customer updates)
 //   - Anything that changes Railway (read-only: no restarts, no redeploys,
@@ -53,6 +60,12 @@
 //     coach-sales deal Won — Coach Sales Agent only creates drafts, tasks,
 //     and recommendations; a human approves and sends everything manually
 //     (see SAFETY_RULES in lib/coachSalesAgent.js)
+//   - Posting, publishing, or scheduling any social content; replying to,
+//     deleting, or moderating any comment/DM/mention; following/unfollowing
+//     or liking on behalf of the account — Social Media Agent only creates
+//     drafts, ideas, and reports; a human approves and posts/replies
+//     manually on the actual platform (see SAFETY_RULES in
+//     lib/socialMediaAgent.js). Social posting stays fully manual for now.
 
 require('dotenv').config();
 
@@ -66,6 +79,7 @@ const smsDeliveryAgent = require('./lib/smsDeliveryAgent');
 const productBugAgent = require('./lib/productBugAgent');
 const filmAIPlanningAgent = require('./lib/filmAIPlanningAgent');
 const coachSalesAgent = require('./lib/coachSalesAgent');
+const socialMediaAgent = require('./lib/socialMediaAgent');
 
 const app = express();
 app.use(express.json());
@@ -143,11 +157,39 @@ const COACH_SALES_REVIEW_REQUIRED_ENV_VARS = [
   'NOTION_DATABASE_AGENT_REPORTS',
 ];
 
-// Deliberately does NOT include the Step 7, Step 8, or Step 9 vars — the
-// Product/Bug, Film AI, and Coach Sales sections of /run-full-brief are all
-// additive (see the productBugSummary, filmAISummary, and coachSalesSummary
-// blocks in that route), so a full brief still runs even before those
-// Notion databases are wired up in Railway.
+// Step 10: Social Media Agent. Each route only requires the database(s) it
+// actually writes to — /add-social-post doesn't need Content Calendar or
+// Social Inbox wired up yet, etc. NOTION_DATABASE_SOCIAL_IDEAS is
+// deliberately NOT required anywhere below — it's read-only (backlog count)
+// in /run-social-review and additive in the full-brief summary, same
+// philosophy as NOTION_DATABASE_AGENT_REPORTS being additive elsewhere.
+const SOCIAL_POST_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_SOCIAL_METRICS'];
+const SOCIAL_COMMENT_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_SOCIAL_INBOX'];
+const SOCIAL_CONTENT_DRAFT_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_CONTENT_CALENDAR'];
+const SOCIAL_REVIEW_REQUIRED_ENV_VARS = [
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_SOCIAL_METRICS',
+  'NOTION_DATABASE_CONTENT_CALENDAR',
+  'NOTION_DATABASE_SOCIAL_INBOX',
+  'NOTION_DATABASE_AGENT_REPORTS',
+];
+// Used only to decide whether /run-full-brief can fold in a live Social
+// Media summary — deliberately lighter than SOCIAL_REVIEW_REQUIRED_ENV_VARS
+// (no NOTION_DATABASE_AGENT_REPORTS needed, since the full-brief summary
+// never files its own Agent Reports row).
+const SOCIAL_SUMMARY_REQUIRED_ENV_VARS = [
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_SOCIAL_METRICS',
+  'NOTION_DATABASE_CONTENT_CALENDAR',
+  'NOTION_DATABASE_SOCIAL_INBOX',
+];
+
+// Deliberately does NOT include the Step 7, Step 8, Step 9, or Step 10
+// vars — the Product/Bug, Film AI, Coach Sales, and Social Media sections
+// of /run-full-brief are all additive (see the productBugSummary,
+// filmAISummary, coachSalesSummary, and socialMediaSummary blocks in that
+// route), so a full brief still runs even before those Notion databases
+// are wired up in Railway.
 const FULL_BRIEF_REQUIRED_ENV_VARS = [
   ...new Set([
     ...DAILY_BRIEF_REQUIRED_ENV_VARS,
@@ -678,6 +720,188 @@ app.post('/run-coach-sales-review', async (req, res) => {
   }
 });
 
+// POST /add-social-post
+// Step 10. Records one already-posted piece of content into the Notion
+// Social Metrics database. Engagement Rate is always computed server-side
+// from the provided likes/comments/shares/saves/views — never accepted as
+// raw input. This route only records what happened — it never posts,
+// publishes, or schedules anything (see SAFETY_RULES in
+// lib/socialMediaAgent.js).
+app.post('/add-social-post', async (req, res) => {
+  const missing = getMissingEnvVars(SOCIAL_POST_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  const validation = socialMediaAgent.validatePostInput(req.body);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Invalid social post submission', details: validation.errors });
+  }
+
+  const engagementRate = socialMediaAgent.computeEngagementRate(validation.normalized);
+
+  try {
+    const postPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_SOCIAL_METRICS },
+      properties: socialMediaAgent.buildSocialMetricsProperties(validation.normalized),
+    });
+
+    return res.status(201).json({
+      status: 'ok',
+      message: 'Social post recorded in Social Metrics.',
+      postPageUrl: postPage.url,
+      engagementRate,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
+// POST /add-social-comment
+// Step 10. Records one comment/DM/mention into the Notion Social Inbox
+// database. If generateDraftReply is true, a deterministic reply draft is
+// generated and stored in Draft Reply (bumping Status to "Needs Approval")
+// — but Approved is always written false and Status is never written
+// "Replied". This route never replies, deletes, or moderates anything on
+// any platform (see SAFETY_RULES in lib/socialMediaAgent.js).
+app.post('/add-social-comment', async (req, res) => {
+  const missing = getMissingEnvVars(SOCIAL_COMMENT_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  const validation = socialMediaAgent.validateCommentInput(req.body);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Invalid social comment submission', details: validation.errors });
+  }
+
+  const { normalized } = validation;
+  let draftReply = '';
+  if (normalized.generateDraftReply && normalized.needsReply) {
+    draftReply = socialMediaAgent.generateReplyDraft(normalized);
+  }
+
+  try {
+    const commentPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_SOCIAL_INBOX },
+      properties: socialMediaAgent.buildSocialInboxProperties({ ...normalized, draftReply }),
+    });
+
+    return res.status(201).json({
+      status: 'ok',
+      message: draftReply
+        ? 'Comment recorded in Social Inbox with a draft reply — nothing was sent. Approve and post the reply manually.'
+        : 'Comment recorded in Social Inbox. Nothing was sent — reply manually or set generateDraftReply: true for a draft.',
+      commentPageUrl: commentPage.url,
+      draftReply: draftReply || null,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
+// POST /draft-social-content
+// Step 10. Generates a deterministic content draft (hook, caption, CTA —
+// never claims guaranteed results, never includes student-athlete data)
+// and files it into the Notion Content Calendar database. Status is always
+// written as "Needs Approval" and Approved is always false — this route
+// never posts, publishes, or schedules anything (see SAFETY_RULES in
+// lib/socialMediaAgent.js). A human must review, approve, and post it
+// manually.
+app.post('/draft-social-content', async (req, res) => {
+  const missing = getMissingEnvVars(SOCIAL_CONTENT_DRAFT_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  const validation = socialMediaAgent.validateContentDraftInput(req.body);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Invalid content draft request', details: validation.errors });
+  }
+
+  const draft = socialMediaAgent.generateContentDraft(validation.normalized);
+
+  try {
+    const draftPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_CONTENT_CALENDAR },
+      properties: socialMediaAgent.buildContentCalendarProperties({ ...validation.normalized, draft }),
+    });
+
+    return res.status(201).json({
+      status: 'ok',
+      message: 'Content draft filed in Content Calendar as "Needs Approval". Nothing was posted or scheduled — approve it in Notion first.',
+      draftPageUrl: draftPage.url,
+      draft,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
+// POST /run-social-review
+// Step 10. Read-only report: queries Social Metrics, Content Calendar,
+// Social Inbox (+ Social Ideas backlog count, if wired up), rolls
+// everything up into a Green/Yellow/Red status, and files one summary row
+// into the Notion Agent Reports database. Never creates or edits a post,
+// content draft, or comment — use /add-social-post, /draft-social-content,
+// and /add-social-comment for that.
+app.post('/run-social-review', async (req, res) => {
+  const missing = getMissingEnvVars(SOCIAL_REVIEW_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    const summary = await socialMediaAgent.gatherSocialMediaSummary(notion, {
+      metricsDbId: process.env.NOTION_DATABASE_SOCIAL_METRICS,
+      calendarDbId: process.env.NOTION_DATABASE_CONTENT_CALENDAR,
+      inboxDbId: process.env.NOTION_DATABASE_SOCIAL_INBOX,
+      ideasDbId: process.env.NOTION_DATABASE_SOCIAL_IDEAS || null,
+    });
+
+    const reportText = socialMediaAgent.buildSocialMediaReportSummary(summary);
+    const reportPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_AGENT_REPORTS },
+      properties: filmAIPlanningAgent.buildAgentReportProperties({
+        agent: 'Social Media Agent',
+        summary: reportText,
+      }),
+    });
+
+    return res.status(201).json({
+      status: 'ok',
+      message: 'Social Media review complete. Read-only — nothing was posted, replied to, or scheduled.',
+      socialMediaStatus: summary.status,
+      totalPosts: summary.totalPosts,
+      totalViews: summary.totalViews,
+      avgEngagementRate: summary.avgEngagementRate,
+      topPosts: summary.topPosts,
+      calendarByStatus: summary.calendarByStatus,
+      upcomingApprovedCount: summary.upcomingApprovedCount,
+      needsApprovalCount: summary.needsApprovalCount,
+      needsReplyBacklogCount: summary.needsReplyBacklogCount,
+      leadCount: summary.leadCount,
+      negativeCount: summary.negativeCount,
+      ideaBacklogCount: summary.ideaBacklogCount,
+      reportPageUrl: reportPage.url,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
 // POST /run-full-brief
 // Runs the Stripe revenue sync and the Railway health check (each writing
 // their own Sales/Railway Health rows and any Approval items), then creates
@@ -763,6 +987,27 @@ app.post('/run-full-brief', async (req, res) => {
     }
   }
 
+  // Step 10: Social Media summary. Additive like the Product/Bug, Film AI,
+  // and Coach Sales summaries above — a missing Social Media database or a
+  // Notion read failure here never blocks the rest of the brief. Read-only:
+  // this never creates/changes a post, content draft, or comment (that only
+  // happens from /add-social-post, /draft-social-content, and
+  // /add-social-comment). NOTION_DATABASE_SOCIAL_IDEAS is additive within
+  // this call too — passed only if set.
+  let socialMediaSummary = null;
+  if (getMissingEnvVars(SOCIAL_SUMMARY_REQUIRED_ENV_VARS).length === 0) {
+    try {
+      socialMediaSummary = await socialMediaAgent.gatherSocialMediaSummary(notion, {
+        metricsDbId: process.env.NOTION_DATABASE_SOCIAL_METRICS,
+        calendarDbId: process.env.NOTION_DATABASE_CONTENT_CALENDAR,
+        inboxDbId: process.env.NOTION_DATABASE_SOCIAL_INBOX,
+        ideasDbId: process.env.NOTION_DATABASE_SOCIAL_IDEAS || null,
+      });
+    } catch (err) {
+      console.error('[social media agent] Failed to gather summary for daily brief (non-fatal):', err.body || err.message || err);
+    }
+  }
+
   try {
     const { salesPage, approvalPage } = await writeRevenueRecords(metrics);
     const { healthPage, approvalPages, approvalDrafts } = await writeRailwayHealthRecords(health);
@@ -774,6 +1019,7 @@ app.post('/run-full-brief', async (req, res) => {
       productBugSummary,
       filmAISummary,
       coachSalesSummary,
+      socialMediaSummary,
     });
     const briefPage = await notion.pages.create({
       parent: { database_id: process.env.NOTION_DATABASE_DAILY_BRIEFS },
@@ -837,6 +1083,7 @@ app.post('/run-full-brief', async (req, res) => {
       productBugSummary,
       filmAISummary,
       coachSalesSummary,
+      socialMediaSummary,
       dailyBriefUrl: briefPage.url,
       delivery,
       sms,
@@ -1121,6 +1368,7 @@ function buildDailyBriefContent({
   productBugSummary,
   filmAISummary,
   coachSalesSummary,
+  socialMediaSummary,
 } = {}) {
   const today = new Date();
   const dateLabel = today.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -1136,9 +1384,9 @@ function buildDailyBriefContent({
     'Confirm daily brief format with founder',
   ];
 
-  const missingDataSources = ['Social channels (Instagram, TikTok, YouTube, X — not connected)'];
+  const missingDataSources = [];
   if (!railwayHealth) {
-    missingDataSources.splice(1, 0, 'Railway health metrics (not wired up in this test run)');
+    missingDataSources.push('Railway health metrics (not wired up in this test run)');
   }
   if (!salesMetrics) {
     missingDataSources.unshift('Stripe (not connected in this test run)');
@@ -1151,6 +1399,11 @@ function buildDailyBriefContent({
   }
   if (!coachSalesSummary) {
     missingDataSources.push('Coach Sales Agent (Notion Coach CRM / Coach Outreach not wired up yet)');
+  }
+  if (!socialMediaSummary) {
+    missingDataSources.push(
+      'Social Media Agent (Notion Social Metrics / Content Calendar / Social Inbox not wired up yet — social posting stays manual either way)'
+    );
   }
 
   const founderTodos = [
@@ -1209,6 +1462,10 @@ function buildDailyBriefContent({
     bodyBlocks.push(...coachSalesAgent.buildCoachSalesSummaryBlocks(coachSalesSummary));
   }
 
+  if (socialMediaSummary) {
+    bodyBlocks.push(...socialMediaAgent.buildSocialMediaSummaryBlocks(socialMediaSummary));
+  }
+
   bodyBlocks.push(
     heading('Top 3 Priorities'),
     numberedList(topPriorities),
@@ -1250,6 +1507,7 @@ function buildDailyBriefContent({
     productBugSummary: productBugSummary || null,
     filmAISummary: filmAISummary || null,
     coachSalesSummary: coachSalesSummary || null,
+    socialMediaSummary: socialMediaSummary || null,
   };
 }
 
