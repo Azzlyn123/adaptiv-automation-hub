@@ -22,12 +22,26 @@
 //     Additive like Google delivery — disabled, unconfigured, or failed SMS
 //     never blocks the Notion brief or the rest of /run-full-brief (see
 //     Step 6G in lib/smsDeliveryAgent.js).
+//   - Product/Bug Agent: collects bugs + beta feedback into Notion, scores
+//     priority, files Tasks/Approvals for Critical/High severity, and can
+//     fold a live Product/Bug summary into the Daily Brief (see Step 7 in
+//     lib/productBugAgent.js).
+//   - Film AI Build Team (PLANNING ONLY — Step 8): seeds and reports on a
+//     Notion roadmap for the volleyball-hitting-analysis MVP. Never runs
+//     computer vision, never touches real athlete video, never deploys
+//     anything. Can fold a live Film AI roadmap summary into the Daily
+//     Brief (see Step 8 in lib/filmAIPlanningAgent.js).
 // Still NOT in scope:
 //   - Social channels
 //   - Anything that writes to Stripe (read-only: no charges, no refunds,
 //     no subscription cancellations, no customer updates)
 //   - Anything that changes Railway (read-only: no restarts, no redeploys,
 //     no variable changes, no deletions)
+//   - Anything that changes app code, closes bugs, deploys, or deletes
+//     user feedback (Product/Bug Agent only creates rows/recommendations)
+//   - Any real computer vision / video processing, and any storage of real
+//     athlete video (Film AI Build Team only creates/reads Notion planning
+//     rows — see Step 8H privacy gate in lib/filmAIPlanningAgent.js)
 //   - Emailing anyone other than FOUNDER_EMAIL
 
 require('dotenv').config();
@@ -40,6 +54,7 @@ const railwayHealthAgent = require('./lib/railwayHealthAgent');
 const googleDeliveryAgent = require('./lib/googleDeliveryAgent');
 const smsDeliveryAgent = require('./lib/smsDeliveryAgent');
 const productBugAgent = require('./lib/productBugAgent');
+const filmAIPlanningAgent = require('./lib/filmAIPlanningAgent');
 
 const app = express();
 app.use(express.json());
@@ -90,10 +105,22 @@ const PRODUCT_TRIAGE_REQUIRED_ENV_VARS = [
   'NOTION_DATABASE_BETA_FEEDBACK',
 ];
 
-// Deliberately does NOT include the Step 7 vars — the Product/Bug section of
-// /run-full-brief is additive (see the productBugSummary block in that
-// route), so a full brief still runs even before Step 7's Notion databases
-// are wired up in Railway.
+// Step 8: Film AI Build Team (planning only). NOTION_DATABASE_AGENT_REPORTS
+// is deliberately NOT required for /create-film-ai-mvp-plan — seeding the
+// roadmap doesn't need it, only /run-film-ai-planning does (it files an
+// Agent Reports row).
+const FILM_AI_MVP_PLAN_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_FILM_AI_ROADMAP'];
+const FILM_AI_PLANNING_REQUIRED_ENV_VARS = [
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_FILM_AI_ROADMAP',
+  'NOTION_DATABASE_AGENT_REPORTS',
+];
+
+// Deliberately does NOT include the Step 7 or Step 8 vars — the Product/Bug
+// and Film AI sections of /run-full-brief are both additive (see the
+// productBugSummary and filmAISummary blocks in that route), so a full
+// brief still runs even before those Notion databases are wired up in
+// Railway.
 const FULL_BRIEF_REQUIRED_ENV_VARS = [
   ...new Set([
     ...DAILY_BRIEF_REQUIRED_ENV_VARS,
@@ -392,6 +419,94 @@ app.post('/run-product-triage', async (req, res) => {
   }
 });
 
+// POST /create-film-ai-mvp-plan
+// Step 8. PLANNING ONLY — writes the 7 volleyball-hitting-analysis MVP
+// tasks (upload -> pose detection -> mechanics analysis -> technique
+// scoring -> report generation -> drill suggestions -> save results) into
+// the Notion Film AI Roadmap database, each starting at Status "Backlog".
+// Never runs computer vision, never touches real athlete video, never
+// deploys anything, never writes to a video storage bucket. Safe to call
+// more than once — each call files a fresh set of 7 rows (does not
+// deduplicate), so only run this when you actually want to (re)seed the
+// roadmap.
+app.post('/create-film-ai-mvp-plan', async (req, res) => {
+  const missing = getMissingEnvVars(FILM_AI_MVP_PLAN_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    const createdPages = [];
+    for (const taskDef of filmAIPlanningAgent.MVP_TASKS) {
+      const page = await notion.pages.create({
+        parent: { database_id: process.env.NOTION_DATABASE_FILM_AI_ROADMAP },
+        properties: filmAIPlanningAgent.buildRoadmapTaskProperties(taskDef),
+      });
+      createdPages.push({ task: taskDef.task, url: page.url });
+    }
+
+    return res.status(201).json({
+      status: 'ok',
+      message: `Film AI MVP plan created: ${createdPages.length} tasks written to Film AI Roadmap. Planning only — no CV code, no video storage, no deploys.`,
+      tasksCreated: createdPages,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
+// POST /run-film-ai-planning
+// Step 8. Read-only report: queries the current state of the Film AI
+// Roadmap, rolls it up into a status + next-up recommendation, and files
+// one summary row into the Notion Agent Reports database. Does not create
+// or modify any Roadmap task, does not run any CV code, does not touch
+// video — use /create-film-ai-mvp-plan to seed tasks.
+app.post('/run-film-ai-planning', async (req, res) => {
+  const missing = getMissingEnvVars(FILM_AI_PLANNING_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    const summary = await filmAIPlanningAgent.gatherFilmAISummary(notion, {
+      roadmapDbId: process.env.NOTION_DATABASE_FILM_AI_ROADMAP,
+    });
+
+    const reportText = filmAIPlanningAgent.buildPlanningReportSummary(summary);
+    const reportPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_AGENT_REPORTS },
+      properties: filmAIPlanningAgent.buildAgentReportProperties({
+        agent: 'Film AI Product Lead',
+        summary: reportText,
+      }),
+    });
+
+    return res.status(201).json({
+      status: 'ok',
+      message: 'Film AI planning report complete. Read-only — no roadmap tasks changed, no CV code run, no video touched.',
+      filmAIStatus: summary.status,
+      totalTasks: summary.totalTasks,
+      openCount: summary.openCount,
+      blockedCount: summary.blockedCount,
+      doneCount: summary.doneCount,
+      criticalOpen: summary.criticalOpen,
+      blockedTasks: summary.blockedTasks,
+      tasksByAgent: summary.tasksByAgent,
+      nextUp: summary.nextUp,
+      privacyGateCleared: summary.privacyGateCleared,
+      reportPageUrl: reportPage.url,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
 // POST /run-full-brief
 // Runs the Stripe revenue sync and the Railway health check (each writing
 // their own Sales/Railway Health rows and any Approval items), then creates
@@ -444,6 +559,22 @@ app.post('/run-full-brief', async (req, res) => {
     }
   }
 
+  // Step 8: Film AI roadmap summary. Additive like the Product/Bug summary
+  // above — a missing NOTION_DATABASE_FILM_AI_ROADMAP or a Notion read
+  // failure here never blocks the rest of the brief. Read-only: this never
+  // creates/changes a Roadmap task or an Agent Reports row (that only
+  // happens from /run-film-ai-planning).
+  let filmAISummary = null;
+  if (getMissingEnvVars(FILM_AI_MVP_PLAN_REQUIRED_ENV_VARS).length === 0) {
+    try {
+      filmAISummary = await filmAIPlanningAgent.gatherFilmAISummary(notion, {
+        roadmapDbId: process.env.NOTION_DATABASE_FILM_AI_ROADMAP,
+      });
+    } catch (err) {
+      console.error('[film ai planning agent] Failed to gather summary for daily brief (non-fatal):', err.body || err.message || err);
+    }
+  }
+
   try {
     const { salesPage, approvalPage } = await writeRevenueRecords(metrics);
     const { healthPage, approvalPages, approvalDrafts } = await writeRailwayHealthRecords(health);
@@ -453,6 +584,7 @@ app.post('/run-full-brief', async (req, res) => {
       railwayHealth: health,
       railwayApprovals: approvalDrafts,
       productBugSummary,
+      filmAISummary,
     });
     const briefPage = await notion.pages.create({
       parent: { database_id: process.env.NOTION_DATABASE_DAILY_BRIEFS },
@@ -514,6 +646,7 @@ app.post('/run-full-brief', async (req, res) => {
       healthPageUrl: healthPage.url,
       railwayApprovalsCreated: approvalPages.map((p) => p.url),
       productBugSummary,
+      filmAISummary,
       dailyBriefUrl: briefPage.url,
       delivery,
       sms,
@@ -791,7 +924,7 @@ async function writeBugRecords(bug) {
 // called with { railwayHealth, railwayApprovals }, it swaps in a real
 // Railway Health section and drops the Railway placeholder line too — both
 // used by /run-full-brief.
-function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals, productBugSummary } = {}) {
+function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals, productBugSummary, filmAISummary } = {}) {
   const today = new Date();
   const dateLabel = today.toISOString().split('T')[0]; // YYYY-MM-DD
   const displayDate = today.toLocaleDateString('en-US', {
@@ -818,6 +951,9 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals,
   }
   if (!productBugSummary) {
     missingDataSources.push('Product/Bug Agent (Notion Product Bugs / Beta Feedback not wired up yet)');
+  }
+  if (!filmAISummary) {
+    missingDataSources.push('Film AI Build Team (Notion Film AI Roadmap not wired up yet)');
   }
 
   const founderTodos = [
@@ -868,6 +1004,10 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals,
     bodyBlocks.push(...productBugAgent.buildProductBugSummaryBlocks(productBugSummary, 0));
   }
 
+  if (filmAISummary) {
+    bodyBlocks.push(...filmAIPlanningAgent.buildFilmAISummaryBlocks(filmAISummary));
+  }
+
   bodyBlocks.push(
     heading('Top 3 Priorities'),
     numberedList(topPriorities),
@@ -907,6 +1047,7 @@ function buildDailyBriefContent({ salesMetrics, railwayHealth, railwayApprovals,
     founderTodos,
     approvalRequests,
     productBugSummary: productBugSummary || null,
+    filmAISummary: filmAISummary || null,
   };
 }
 

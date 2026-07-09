@@ -7,6 +7,7 @@ Adaptiv Athletics Railway Automation Hub. Currently does six things:
 4. **Google Doc + Email Delivery** (OAuth) — after `/run-full-brief` writes to Notion, it also creates/updates a Google Doc with the full brief and emails a short summary to `FOUNDER_EMAIL`, with the Doc link in both Notion and the email.
 5. **SMS Summary** (Twilio, opt-in) — after Google delivery, sends a short text summary of the brief to `FOUNDER_PHONE_NUMBER`. Disabled by default — set `SMS_ENABLED=true` to turn it on.
 6. **Product/Bug Agent** — collects bugs, beta feedback, app store issues, and feature requests into the Notion "Product Bugs" and "Beta Feedback" databases, scores each bug's priority, files a Notion "Tasks" row for Critical/High severity bugs and a Notion "Approvals" row for Critical severity bugs, and folds a live Product/Bug summary into `/run-full-brief`.
+7. **Film AI Build Team** (PLANNING ONLY) — seeds a 7-task MVP roadmap for volleyball hitting analysis into the Notion "Film AI Roadmap" database, reports on its status into the Notion "Agent Reports" database, and folds a live Film AI roadmap summary into `/run-full-brief`. Never runs computer vision, never touches real athlete video, never deploys anything — see Step 8 below.
 
 Explicitly out of scope:
 - No social channel connections
@@ -16,6 +17,7 @@ Explicitly out of scope:
 - **Only emails `FOUNDER_EMAIL`.** The Gmail send agent never emails anyone else.
 - **Only texts `FOUNDER_PHONE_NUMBER`.** The SMS agent never texts anyone else, and the SMS body is always a short summary — never the full report.
 - **No automatic code changes, deploys, bug closures, or feedback deletions.** The Product/Bug Agent only ever creates rows and recommendations — a human triages, fixes, and closes everything.
+- **No computer vision, no real athlete video, ever (yet).** The Film AI Build Team only creates/reads Notion planning rows. No CV model runs, no video is uploaded, processed, or stored, and nothing gets deployed. Real athlete video stays off-limits until the Step 8H privacy gate (review, consent, deletion policy, secure storage plan) is cleared — Film AI data is flagged as a FERPA compliance risk in Adaptiv's business strategy.
 
 ## File structure
 
@@ -27,7 +29,8 @@ adaptiv-automation-hub/
 │   ├── railwayHealthAgent.js   Railway GraphQL reads + status rules + Notion payload builders
 │   ├── googleDeliveryAgent.js  OAuth + Google Docs/Drive/Gmail delivery + failure-isolation logic
 │   ├── smsDeliveryAgent.js     Twilio SMS summary + failure-isolation logic
-│   └── productBugAgent.js      Priority scoring + validation + Notion payload builders for bugs/feedback
+│   ├── productBugAgent.js      Priority scoring + validation + Notion payload builders for bugs/feedback
+│   └── filmAIPlanningAgent.js  MVP task definitions + Notion payload builders for the Film AI roadmap (planning only)
 ├── package.json
 ├── .env.example            Copy to .env for local dev — never commit real .env
 ├── .gitignore
@@ -86,6 +89,12 @@ adaptiv-automation-hub/
    NOTION_DATABASE_TASKS=e57e68cc9940495bb60253d19ef557ed
    ```
    (`NOTION_DATABASE_TASKS` and `NOTION_DATABASE_APPROVALS` are additive — see Step 7B.)
+   For the Film AI Build Team (`/create-film-ai-mvp-plan`, `/run-film-ai-planning`) — PLANNING ONLY, also set:
+   ```
+   NOTION_DATABASE_FILM_AI_ROADMAP=436780aff5f843da809600d25b361d6e
+   NOTION_DATABASE_AGENT_REPORTS=e00abb4ab7ba431ea6f0714d498db031
+   ```
+   (`NOTION_DATABASE_AGENT_REPORTS` is only required by `/run-film-ai-planning` — see Step 8B.)
 3. Run it:
    ```
    npm start
@@ -103,6 +112,8 @@ adaptiv-automation-hub/
    curl -X POST http://localhost:3000/submit-bug -H "Content-Type: application/json" -d "{\"title\":\"Test bug\",\"severity\":\"Low\"}"
    curl -X POST http://localhost:3000/submit-feedback -H "Content-Type: application/json" -d "{\"feedback\":\"Test feedback\"}"
    curl -X POST http://localhost:3000/run-product-triage
+   curl -X POST http://localhost:3000/create-film-ai-mvp-plan
+   curl -X POST http://localhost:3000/run-film-ai-planning
    ```
 
 ## Step 3A — Create a restricted Stripe key
@@ -178,7 +189,7 @@ Returns `201` with the computed health data and the new Notion page URL(s). Retu
 - A Notion database ID is wrong, not shared with the integration, or a property name/type doesn't match
 
 ### `POST /run-full-brief`
-Runs the Stripe revenue sync and the Railway health check, then creates a Daily Brief that includes real **Sales Summary** and **Railway Health** sections built from that same data, instead of listing Stripe/Railway as missing data sources. Also reads the current Product Bugs + Beta Feedback state (Step 7) and, if `NOTION_DATABASE_PRODUCT_BUGS`/`NOTION_DATABASE_BETA_FEEDBACK` are set, folds a **Product / Bug Agent** section into the brief too — additive, same as the rest of this route: a missing var or a failed Notion read here never blocks the brief. Then attempts Google Doc + email delivery (Step 5), then an SMS summary (Step 6), and writes the results (Google Doc URL / Email Sent / Email Error / Delivery Status, plus SMS Sent / SMS Error / SMS Status) back onto the same Daily Brief row. Neither Google delivery nor SMS ever blocks this response — if either is not configured or fails, the Notion brief is still created; `delivery.deliveryStatus` comes back as `Not Sent` / `Partial` / `Failed` and `sms.smsStatus` comes back as `Disabled` / `Failed` / `Sent`. Returns `201` with the metrics, health data, `productBugSummary`, the Sales/Railway Health/Approvals page URLs (as applicable), the Daily Brief page URL, the `delivery` result, and the `sms` result.
+Runs the Stripe revenue sync and the Railway health check, then creates a Daily Brief that includes real **Sales Summary** and **Railway Health** sections built from that same data, instead of listing Stripe/Railway as missing data sources. Also reads the current Product Bugs + Beta Feedback state (Step 7) and, if `NOTION_DATABASE_PRODUCT_BUGS`/`NOTION_DATABASE_BETA_FEEDBACK` are set, folds a **Product / Bug Agent** section into the brief too — additive, same as the rest of this route: a missing var or a failed Notion read here never blocks the brief. Also reads the current Film AI Roadmap state (Step 8) and, if `NOTION_DATABASE_FILM_AI_ROADMAP` is set, folds a **Film AI Build Team** section into the brief too — same additive pattern, read-only, never runs CV code or touches video. Then attempts Google Doc + email delivery (Step 5), then an SMS summary (Step 6), and writes the results (Google Doc URL / Email Sent / Email Error / Delivery Status, plus SMS Sent / SMS Error / SMS Status) back onto the same Daily Brief row. Neither Google delivery nor SMS ever blocks this response — if either is not configured or fails, the Notion brief is still created; `delivery.deliveryStatus` comes back as `Not Sent` / `Partial` / `Failed` and `sms.smsStatus` comes back as `Disabled` / `Failed` / `Sent`. Returns `201` with the metrics, health data, `productBugSummary`, `filmAISummary`, the Sales/Railway Health/Approvals page URLs (as applicable), the Daily Brief page URL, the `delivery` result, and the `sms` result.
 
 ### `GET /auth/google`
 Step 5G one-time setup route. Visit this **in a browser** (not curl) to start the OAuth consent flow — redirects to Google's consent screen for the scopes in Step 5C.
@@ -219,6 +230,12 @@ Only `feedback` is required. Writes the row with `Status: New`. If 3+ feedback i
 
 ### `POST /run-product-triage`
 Step 7. Read-only report. Queries every row currently in Product Bugs + Beta Feedback, ranks open bugs (`New`/`Triaged`/`In Progress`/`Blocked`) by Priority Score, and returns the same Green/Yellow/Red status used in the Daily Brief plus `criticalBugs`, `highBugs`, `filmAIBlockers`, `newFeedbackCount`, `recommendedFixToday`, `rankedOpenBugs`, and `repeatedFeedbackAreas`. Never closes a bug, never creates a Task/Approval, never changes anything — use `/submit-bug` for writes.
+
+### `POST /create-film-ai-mvp-plan`
+Step 8. PLANNING ONLY. Writes the 7 volleyball-hitting-analysis MVP tasks (see Step 8F) into the Notion Film AI Roadmap database, each starting at `Status: Backlog`. Never runs computer vision, never touches real athlete video, never deploys anything, never writes to a video storage bucket — there isn't one configured. Safe to call more than once; each call files a fresh set of 7 rows rather than deduplicating, so only run it when you actually want to (re)seed the roadmap. Returns `201` with `tasksCreated` (task name + Notion page URL for each of the 7 rows).
+
+### `POST /run-film-ai-planning`
+Step 8. Read-only report. Queries the current state of the Film AI Roadmap, rolls it up into a Green/Yellow/Red status (`gatherFilmAISummary()` in `lib/filmAIPlanningAgent.js`), and files one summary row into the Notion Agent Reports database. Does not create or modify a Roadmap task, does not run any CV code, does not touch video. Returns `201` with `filmAIStatus`, `totalTasks`/`openCount`/`blockedCount`/`doneCount`, `criticalOpen`, `blockedTasks`, `tasksByAgent`, `nextUp`, `privacyGateCleared` (always `false` — no code path in this service flips it), and `reportPageUrl`.
 
 ## Step 3D — Notion Sales database fields
 
@@ -631,6 +648,153 @@ Status rules (`gatherProductBugSummary()` in `lib/productBugAgent.js`):
 
 Each `/run-product-triage` or `/run-full-brief` run answers: what broke (Critical/High open bugs), what confused users (repeated feedback by Area), what blocks payment/signup/coaches (via the flags folded into Notes + the App Store/payment/signup keyword check in the status rules), what should be fixed today (`recommendedFixToday` — highest Priority Score open bug, or the most-repeated feedback Area), what can wait (everything else, ranked lowest in `rankedOpenBugs`), and what should become a Film AI requirement (`filmAIBlockers` — open bugs typed "Film AI Task").
 
+## Step 8 — Film AI Build Team (PLANNING ONLY)
+
+**This entire step is planning scaffolding.** It writes and reads Notion rows to track the volleyball-hitting-analysis MVP build. It does not run any computer vision, does not touch real athlete video, does not create any deployment action, and does not connect to production user videos. Treat it the same way you'd treat a project-management tool — because that's all it is right now.
+
+### Step 8A — Notion database fields
+
+Already set up on the **Film AI Roadmap** database:
+
+| Property | Type |
+|---|---|
+| Task | Title |
+| Agent | Select (Film AI Product Lead, Computer Vision Engineer, Volleyball Technique Analyst, Film AI QA Agent, Film AI Demo Agent) |
+| Status | Select (Backlog, Ready, In Progress, Blocked, Testing, Done) |
+| Priority | Select (Critical, High, Medium, Low) |
+| Feature Area | Select (Upload, Pose Detection, Technique Scoring, Report Generation, Database Save, Coach View, Athlete View, Demo) |
+| Sport | Select (Volleyball, All Sports) |
+| Notes | Text |
+| Due Date | Date |
+
+Already set up on the **Agent Reports** database (previously reserved/unused — now active as of Step 8):
+
+| Property | Type |
+|---|---|
+| Name | Title |
+| Agent | Select (same 5 agent options as above) |
+| Date | Date |
+| Summary | Text |
+
+Also already set up (schema only — nothing in this service reads or writes to it yet) on the **Film AI Test Clips** database, for the future QA/demo phase:
+
+| Property | Type |
+|---|---|
+| Clip | Title |
+| Sport | Select (Volleyball, All Sports) |
+| Skill | Select (Hitting) |
+| Angle | Select (Side, Diagonal) |
+| Lighting | Select (Good, Medium, Poor) |
+| Result | Select (Pass, Needs Review, Fail) |
+| Confidence | Number |
+| Notes | Text |
+
+### Step 8B — Railway environment variables
+
+On the `adaptiv-automation-hub` Railway service, set:
+```
+NOTION_DATABASE_FILM_AI_ROADMAP=
+NOTION_DATABASE_AGENT_REPORTS=
+```
+Both are safe to store as plain env vars — there's no new secret in Step 8 beyond the existing `NOTION_API_KEY`. `NOTION_DATABASE_FILM_AI_ROADMAP` is required by both new routes; `NOTION_DATABASE_AGENT_REPORTS` is only required by `/run-film-ai-planning`.
+
+### Step 8C — The volleyball hitting MVP pipeline
+
+The first Film AI MVP is scoped to one skill, one sport: **upload a volleyball hitting clip → detect movement → analyze hitting mechanics → score technique → generate a report → suggest drills → save to the athlete's profile.** Each stage of that pipeline is one of the 7 seeded roadmap tasks (Step 8F) — nothing further is in scope for the MVP.
+
+### Step 8D — Test it
+
+After deploying with the Step 8B variables set:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-film-ai-mvp-plan
+```
+Expected: 7 new rows appear in Notion → Film AI Roadmap, one per MVP task, all starting at `Status: Backlog`.
+
+Then:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-film-ai-planning
+```
+Expected: a new row appears in Notion → Agent Reports summarizing the roadmap status, and the JSON response includes `filmAIStatus`, `nextUp`, and the rest of the rollup.
+
+Then:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+```
+Expected: the Daily Brief now includes a "Film AI Build Team" section showing the roadmap status.
+
+### Step 8E — Report output format (for later — not built by this service yet)
+
+Once real technique scoring exists, each Film AI Report is expected to follow this fixed markdown template (this is documented now so the eventual report-generation code has a locked target — this service does not generate this yet):
+```
+# Film AI Report
+Sport: Volleyball
+Skill: Hitting
+Clip Quality: Good / Medium / Poor
+Confidence: 0-100
+
+## Technique Score
+Score: 0-100
+
+## What Looked Good
+## What Needs Work
+## Key Mechanics
+Approach / Plant / Jump / Arm swing / Contact point / Landing
+
+## Suggested Drills
+1.
+2.
+3.
+
+## Coach Notes
+## Disclaimer
+This is a development tool, not a medical or injury diagnosis.
+```
+
+### Step 8F — The 7 MVP roadmap tasks
+
+Written by `/create-film-ai-mvp-plan` (see `MVP_TASKS` in `lib/filmAIPlanningAgent.js` for the full acceptance criteria/blockers on each):
+
+| # | Task | Agent | Priority | Feature Area |
+|---|---|---|---|---|
+| 1 | Build clip upload flow (web + mobile) | Film AI Product Lead | Critical | Upload |
+| 2 | Detect athlete movement / pose in clip | Computer Vision Engineer | Critical | Pose Detection |
+| 3 | Analyze hitting mechanics (approach, plant, jump, arm swing, contact, landing) | Volleyball Technique Analyst | Critical | Technique Scoring |
+| 4 | Score technique (0-100 + confidence) | Volleyball Technique Analyst | High | Technique Scoring |
+| 5 | Generate Film AI Report | Film AI Product Lead | High | Report Generation |
+| 6 | Suggest drills (1-3 per report) | Volleyball Technique Analyst | Medium | Report Generation |
+| 7 | Save results to athlete profile / Notion / database | Computer Vision Engineer | High | Database Save |
+
+Tasks 1 and 7 carry an explicit blocker note tying them to the Step 8H privacy gate — neither can move past "Ready" with real athlete data until that gate clears.
+
+### Step 8G — Daily Brief Film AI section
+
+`/run-full-brief` now includes (when `NOTION_DATABASE_FILM_AI_ROADMAP` is set):
+```
+## Film AI Build Team
+Status: Green / Yellow / Red (planning only — no CV model running yet)
+Roadmap: X done / Y open / Z total
+Blocked Tasks: -
+Critical Open Tasks: -
+Next Up: -
+Privacy gate cleared for real athlete video: No
+```
+Status rules (`gatherFilmAISummary()` in `lib/filmAIPlanningAgent.js`):
+- **Green** — no blocked tasks, no open Critical-priority tasks.
+- **Yellow** — a blocked task exists, or an open Critical-priority task exists (but not both).
+- **Red** — both a blocked task and an open Critical-priority task exist.
+
+### Step 8H — Privacy gate (do not skip)
+
+Adaptiv's business strategy flags data privacy and FERPA compliance as a major risk for Film AI specifically, because it involves video of (potentially minor) athletes. Before any real athlete video is uploaded, processed, or stored — by this service or any future one — the following need to be in place:
+- A privacy review
+- File size limits
+- A video deletion policy
+- Terms language covering video collection and use
+- Coach **and** athlete consent (and parent/guardian consent for minors)
+- A secure storage plan
+
+None of this is built yet, and nothing in this codebase has a path to bypass it — `/create-film-ai-mvp-plan` and `/run-film-ai-planning` only ever touch Notion planning rows, and `gatherFilmAISummary()` always reports `privacyGateCleared: false`. Tasks 1 (Upload) and 7 (Database Save) in the seeded roadmap carry this as an explicit blocker note. Treat "start building the real CV pipeline against real clips" as gated behind a founder decision, not an engineering one.
+
 ## Deploying to Railway
 
 1. **Push this folder to GitHub.**
@@ -646,7 +810,7 @@ Each `/run-product-triage` or `/run-full-brief` run answers: what broke (Critica
 2. **Connect the repo to Railway.**
    In the Railway dashboard, open the `adaptiv-automation-hub` service (already created) → Settings → Source → Connect Repo → select this new GitHub repo.
 3. **Environment variables.**
-   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), and `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
+   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, and `NOTION_DATABASE_FILM_AI_ROADMAP` / `NOTION_DATABASE_AGENT_REPORTS` per Step 8B, if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
 4. **Deploy.**
    Railway will build and deploy automatically once the repo is connected. Watch the Deployments tab for build success.
 5. **Get the public URL.**
@@ -665,4 +829,6 @@ Each `/run-product-triage` or `/run-full-brief` run answers: what broke (Critica
 - Google Doc "create or update" is keyed on exact title match (`Adaptiv Daily CEO Brief - YYYY-MM-DD`). Running `/run-full-brief` more than once on the same day updates that same doc rather than creating a duplicate; running it on the next calendar day creates a new one.
 - If the final Notion write-back (saving Google Doc URL / Email Sent / Delivery Status / SMS Sent / SMS Status onto the Daily Brief row) fails after the doc/email/SMS already succeeded, that's logged to Railway logs but there's no automatic retry yet — a manual re-check of that day's Notion row covers it for now.
 - The Product/Bug Agent's "Product / Bug Agent" Daily Brief section isn't folded into the Google Doc or SMS text yet — it's in the Notion brief and in `/run-full-brief`'s JSON response (`productBugSummary`) for now. Extending `googleDeliveryAgent.js`/`smsDeliveryAgent.js` to include it is a small follow-up if wanted.
-- SMS delivery (Step 6) and the Product/Bug Agent (Step 7) are both done. The Film AI Build Team (Step 8) is the next planned phase.
+- SMS delivery (Step 6), the Product/Bug Agent (Step 7), and the Film AI Build Team planning phase (Step 8) are all done. The Coach Sales CRM Agent (Step 9) is the next planned phase, prioritized ahead of social automation since the launch plan targets coach outreach, beta coaches, and getting 5+ paid coach accounts.
+- The Film AI Build Team is planning-only by design (Step 8H). Building the actual computer vision pipeline, uploading real athlete video, or connecting to production user data is explicitly out of scope until the privacy gate (review, consent, deletion policy, secure storage plan) is cleared — that's a founder decision, not something to build around.
+- The Film AI Build Team's "Film AI Build Team" Daily Brief section isn't folded into the Google Doc or SMS text yet either, same as the Product/Bug Agent section — it's in the Notion brief and in `/run-full-brief`'s JSON response (`filmAISummary`) for now.
