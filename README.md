@@ -1,6 +1,6 @@
 # Adaptiv Automation Hub
 
-Adaptiv Athletics Railway Automation Hub. Currently does eight things:
+Adaptiv Athletics Railway Automation Hub. Currently does ten things:
 1. **Daily Brief writer** — writes a Daily CEO Brief into the Notion "Daily Briefs" database.
 2. **Stripe Revenue Agent** (read-only) — pulls subscription data from Stripe, writes a report row into the Notion "Sales" database, and files a Notion "Approvals" item when subscriptions are past due.
 3. **Railway Health Agent** (read-only) — checks the frontend/backend Railway services and the backend health endpoint, writes a report row into the Notion "Railway Health" database, and files a Notion "Approvals" item when something looks wrong.
@@ -9,17 +9,22 @@ Adaptiv Athletics Railway Automation Hub. Currently does eight things:
 6. **Product/Bug Agent** — collects bugs, beta feedback, app store issues, and feature requests into the Notion "Product Bugs" and "Beta Feedback" databases, scores each bug's priority, files a Notion "Tasks" row for Critical/High severity bugs and a Notion "Approvals" row for Critical severity bugs, and folds a live Product/Bug summary into `/run-full-brief`.
 7. **Film AI Build Team** (PLANNING ONLY) — seeds a 7-task MVP roadmap for volleyball hitting analysis into the Notion "Film AI Roadmap" database, reports on its status into the Notion "Agent Reports" database, and folds a live Film AI roadmap summary into `/run-full-brief`. Never runs computer vision, never touches real athlete video, never deploys anything — see Step 8 below.
 8. **Coach Sales CRM Agent** — tracks coach/school/club leads in the Notion "Coach CRM" database, scores and ranks them, drafts (never sends) approval-gated outreach copy into the Notion "Coach Outreach" database, reports pipeline status into "Agent Reports", and folds a live Coach Sales summary into `/run-full-brief`. Never emails/texts/DMs a coach, never marks a deal Won, never includes student-athlete data in outreach — see Step 9 below.
+9. **Social Media Agent** — tracks posted-content performance, incoming comments/DMs/mentions, a content-idea backlog, and a content calendar via the Notion "Social Metrics" / "Content Calendar" / "Social Inbox" / "Social Ideas" databases; drafts (never posts) content and replies for human approval; folds a live Social Media summary into `/run-full-brief`. Never posts, publishes, schedules, replies, deletes, or moderates anything automatically — see Step 10 below.
+10. **Approval Action Agent** — the FIRST agent in this codebase allowed to take a real external action, and only for a Notion "Approvals" row a human already flipped to `Status = "Approved"`. Executes exactly 6 whitelisted action types (create a Notion task, email/text the founder, email a coach at the approved address, update a Coach CRM lead's stage, mark a Coach Outreach row sent), logs every result back to Notion, and folds a live summary into `/run-full-brief`. Critical/High-risk approvals and any unlisted action type can never execute — see Step 11 below.
 
 Explicitly out of scope:
 - No social channel connections
 - **No writes to Stripe, ever.** This service only reads Stripe data. It never creates charges, never issues refunds, never cancels subscriptions, and never updates customers.
 - **No writes to Railway, ever.** This service only reads Railway service/deployment status. It never restarts a service, never triggers a redeploy, never changes a variable, and never deletes anything. If something needs action, it files a Notion Approval item instead — a human decides and acts from there.
 - **No Google password, ever.** Google delivery uses OAuth only. This service and this assistant never see or handle a live Google account password.
-- **Only emails `FOUNDER_EMAIL`.** The Gmail send agent never emails anyone else.
+- **Only emails `FOUNDER_EMAIL`, or a coach at an address that came from an approved payload.** Nothing else — no CC/BCC, no reading a recipient from elsewhere.
 - **Only texts `FOUNDER_PHONE_NUMBER`.** The SMS agent never texts anyone else, and the SMS body is always a short summary — never the full report.
 - **No automatic code changes, deploys, bug closures, or feedback deletions.** The Product/Bug Agent only ever creates rows and recommendations — a human triages, fixes, and closes everything.
 - **No computer vision, no real athlete video, ever (yet).** The Film AI Build Team only creates/reads Notion planning rows. No CV model runs, no video is uploaded, processed, or stored, and nothing gets deployed. Real athlete video stays off-limits until the Step 8H privacy gate (review, consent, deletion policy, secure storage plan) is cleared — Film AI data is flagged as a FERPA compliance risk in Adaptiv's business strategy.
-- **No automatic outreach to coaches, ever.** The Coach Sales CRM Agent only ever creates lead rows, outreach drafts, tasks, and recommendations — it never sends an email, text, or DM, and it never marks a deal Won. A human reviews and approves every outreach draft in Notion, then sends it themselves. See Step 9's `SAFETY_RULES` in `lib/coachSalesAgent.js`.
+- **No automatic outreach to coaches, ever, outside an explicitly approved action.** The Coach Sales CRM Agent only ever creates lead rows, outreach drafts, tasks, and recommendations on its own — it never marks a deal Won automatically. See Step 9's `SAFETY_RULES` in `lib/coachSalesAgent.js`.
+- **No social posting, ever (yet).** The Social Media Agent only creates drafts, ideas, and reports — a human posts/replies manually on the actual platform. See Step 10's `SAFETY_RULES` in `lib/socialMediaAgent.js`.
+- **No Railway restarts/redeploys, no Stripe writes, no social posting, even with an approval — not yet.** `ENABLE_RAILWAY_ACTIONS` / `ENABLE_STRIPE_ACTIONS` / `ENABLE_SOCIAL_ACTIONS` are wired up but stay `false`; there is no action type for any of them in `lib/approvalActionAgent.js`'s whitelist yet — expanding it is a deliberate, separate decision. See Step 11 below.
+- **No Critical-risk or High-risk action ever executes automatically**, no matter what's approved in Notion — this is enforced in code (`checkRiskAllowed()` in `lib/approvalActionAgent.js`), not just documented.
 
 ## File structure
 
@@ -33,7 +38,9 @@ adaptiv-automation-hub/
 │   ├── smsDeliveryAgent.js     Twilio SMS summary + failure-isolation logic
 │   ├── productBugAgent.js      Priority scoring + validation + Notion payload builders for bugs/feedback
 │   ├── filmAIPlanningAgent.js  MVP task definitions + Notion payload builders for the Film AI roadmap (planning only)
-│   └── coachSalesAgent.js      Lead scoring + validation + outreach drafting + Notion payload builders for Coach CRM/Outreach
+│   ├── coachSalesAgent.js      Lead scoring + validation + outreach drafting + Notion payload builders for Coach CRM/Outreach
+│   ├── socialMediaAgent.js     Post/comment tracking + content drafting + Notion payload builders for Social Metrics/Content Calendar/Social Inbox/Social Ideas
+│   └── approvalActionAgent.js  Approved-action execution (6 whitelisted types) + hard-coded safety rules + Notion payload builders for Approvals
 ├── package.json
 ├── .env.example            Copy to .env for local dev — never commit real .env
 ├── .gitignore
@@ -1149,6 +1156,135 @@ A reasonable cadence to aim for once this is in regular use — not enforced by 
 - Pulling live engagement data automatically (Layer 2 — deferred until a platform API is wired up, and even then, posting/replying stays manual or becomes its own approved feature).
 - Generating images, video, or any other media asset — content drafts are text only (hook/caption/CTA).
 
+## Step 11 — Approval Action Agent
+
+The first agent in this codebase allowed to take a real external action — but ONLY for a Notion Approvals row a human has already flipped to `Status = "Approved"`, and only for one of exactly 6 whitelisted action types. Every other agent in Steps 3-10 only reads data and drafts/recommends; nothing before Step 11 has ever sent a message, created an outside record, or changed a CRM field on its own.
+
+**Flow:** an agent (or a human) recommends an action → drafts it → files a Notion Approvals row (`Status = "Needs Approval"`) → a human reviews it in Notion and flips `Status` to `"Approved"` → `POST /run-approved-actions` scans for `Status = "Approved"` rows and, only for whitelisted action types, executes the action and writes the result back to Notion (`Status → "Executed"` or `"Failed"`, `Result` / `Error` / `Executed At` filled in).
+
+### Step 11A — Notion Approvals database fields
+
+The Approvals database (already in use since Step 3/4) has these properties:
+
+| Property | Type | Notes |
+|---|---|---|
+| Action | Title | Short description of the requested action |
+| Agent | Select | Which agent is requesting it |
+| Risk | Select | `Low` / `Medium` / `High` / `Critical` |
+| Status | Select | `Needs Approval` / `Approved` / `Rejected` / `Executed` / `Failed` / `Cancelled` |
+| Tool | Select | `Notion` / `Gmail` / `Twilio` / `Railway` / `Stripe` / `Google Docs` / `Social` / `Coach CRM` / `Product/Bug` / `Film AI` |
+| Payload | Text | JSON string — the exact action to run (see Step 11D payload shapes below) |
+| Approved By | Text | Who approved it (filled in manually, or by `/create-test-approval`) |
+| Approved At | Date | When it was approved |
+| Executed At | Date | When `/run-approved-actions` processed the row (set whether it succeeds or fails) |
+| Result | Text | Human-readable outcome on success |
+| Error | Text | Human-readable failure/blocked reason on failure |
+
+### Step 11B — What's allowed to execute (v1 whitelist)
+
+Only these 6 action types can ever execute, no matter what a Payload claims:
+
+| Action type | Tool | Risk | Requires |
+|---|---|---|---|
+| `CREATE_NOTION_TASK` | Notion | Low | `ENABLE_NOTION_ACTIONS=true` |
+| `SEND_FOUNDER_EMAIL` | Gmail | Low | `ENABLE_EMAIL_ACTIONS=true` + Step 5 Google vars |
+| `SEND_FOUNDER_SMS` | Twilio | Medium | `ENABLE_SMS_ACTIONS=true` + `SMS_ENABLED=true` + Step 6 Twilio vars |
+| `SEND_COACH_EMAIL` | Gmail | Medium | `ENABLE_EMAIL_ACTIONS=true` + Step 5 Google vars |
+| `UPDATE_COACH_CRM_STATUS` | Coach CRM | Low | `ENABLE_NOTION_ACTIONS=true` |
+| `MARK_OUTREACH_SENT` | Coach CRM | Low | `ENABLE_NOTION_ACTIONS=true` |
+
+**Not enabled in v1, on purpose:** Railway restart/redeploy, any Stripe action, any social posting/replying action. `ENABLE_RAILWAY_ACTIONS` / `ENABLE_STRIPE_ACTIONS` / `ENABLE_SOCIAL_ACTIONS` exist as env vars so the switch is already wired up, but there is no action type for any of them in `SUPPORTED_ACTION_TYPES` yet — flipping those flags to `true` today has no effect. Add them later, deliberately, once Step 11 has run safely in `manual-safe` mode for a while.
+
+### Step 11C — Railway environment variables
+
+```
+APPROVAL_ACTIONS_ENABLED=true
+APPROVAL_EXECUTION_MODE=manual-safe
+ENABLE_EMAIL_ACTIONS=true
+ENABLE_SMS_ACTIONS=true
+ENABLE_NOTION_ACTIONS=true
+ENABLE_RAILWAY_ACTIONS=false
+ENABLE_STRIPE_ACTIONS=false
+ENABLE_SOCIAL_ACTIONS=false
+```
+`APPROVAL_ACTIONS_ENABLED` + `APPROVAL_EXECUTION_MODE=manual-safe` together are the master kill switch — if either is missing or `APPROVAL_EXECUTION_MODE` is anything other than exactly `manual-safe`, `/run-approved-actions` refuses the whole request instead of executing anything.
+
+### Step 11D — Routes and payload shapes
+
+**`POST /create-test-approval`** — creates one Approvals row directly (for testing). Body:
+```json
+{
+  "action": "Create onboarding follow-up task",
+  "agent": "Coach Sales Agent",
+  "risk": "Low",
+  "tool": "Notion",
+  "status": "Approved",
+  "payload": { "type": "CREATE_NOTION_TASK", "name": "Follow up with new athlete signup" }
+}
+```
+`status` defaults to `"Approved"` if omitted. This route never executes anything — it only ever creates a row.
+
+**`POST /run-approved-actions`** — scans Approvals for `Status = "Approved"`, executes whitelisted rows, writes results back. No request body needed.
+
+Payload shapes by action type:
+```
+CREATE_NOTION_TASK       { "type": "CREATE_NOTION_TASK", "name": "...", "notes"?: "...", "priority"?: "Low"|"Medium"|"High" }
+SEND_FOUNDER_EMAIL       { "type": "SEND_FOUNDER_EMAIL", "subject": "...", "body": "..." }
+SEND_FOUNDER_SMS         { "type": "SEND_FOUNDER_SMS", "message": "..." }
+SEND_COACH_EMAIL         { "type": "SEND_COACH_EMAIL", "to": "coach@example.com", "subject": "...", "body": "..." }
+UPDATE_COACH_CRM_STATUS  { "type": "UPDATE_COACH_CRM_STATUS", "leadId": "<Coach CRM page id>", "stage": "...", "nextFollowUp"?: "YYYY-MM-DD" }
+MARK_OUTREACH_SENT       { "type": "MARK_OUTREACH_SENT", "outreachId": "<Coach Outreach page id>" }
+```
+`stage` may not be set to `"Won"` through this route — that stays a manual Notion edit, same rule as Step 9.
+
+### Step 11 hard safety rules (enforced in code, not just documented)
+
+All in `lib/approvalActionAgent.js`:
+1. Never execute a row whose `Status` isn't exactly `"Approved"`.
+2. Never execute a `Critical`-risk action, ever — checked on the row's own declared Risk before the payload is even parsed.
+3. Never execute a `High`-risk action — there's no v1 flag to enable it.
+4. Never refund a payment, cancel a subscription, delete data, modify Stripe, change production env vars, post to social, or DM anyone automatically — the 6-item whitelist is closed; anything else is rejected regardless of what Risk/Tool the row claims.
+5. Never send to anyone except `FOUNDER_EMAIL`/`FOUNDER_PHONE_NUMBER` (founder actions) or the exact `to` address inside an approved payload (coach email) — no overrides, no CC/BCC.
+6. Every execution result is logged back to Notion — `Executed` + `Result`, or `Failed` + `Error`.
+7. Unknown/unsupported action types never execute.
+8. Master kill switch (`APPROVAL_ACTIONS_ENABLED` + `APPROVAL_EXECUTION_MODE=manual-safe`) plus a per-tool flag for every action type.
+
+### Step 11E — Test it (safe action)
+
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-test-approval \
+  -H "Content-Type: application/json" \
+  -d '{"action":"Create onboarding follow-up task","risk":"Low","tool":"Notion","status":"Approved","payload":{"type":"CREATE_NOTION_TASK","name":"Follow up with new athlete signup"}}'
+```
+Then:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-approved-actions
+```
+Expected: a new row in Notion Tasks, the Approvals row's `Status` → `Executed`, and `Result` populated with a confirmation message.
+
+### Step 11F — Test it (blocked critical action)
+
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-test-approval \
+  -H "Content-Type: application/json" \
+  -d '{"action":"Refund angry customer","risk":"Critical","tool":"Stripe","status":"Approved","payload":{"type":"REFUND_PAYMENT","amount":4999,"customerId":"cus_fake"}}'
+```
+Then run `/run-approved-actions` again. Expected: nothing is refunded (this service still never writes to Stripe), the row's `Status` → `Failed`, and `Error` reads *"Critical actions are blocked and can never execute automatically."* — proof the system doesn't blindly obey an approval just because it's marked `Approved`.
+
+### Step 11G — Daily Brief Approval Action Agent section
+
+`/run-full-brief` now includes (when `NOTION_DATABASE_APPROVALS` is set):
+```
+## Approval Action Agent
+Status: Green / Yellow / Red
+Executed today: X — Failed: Y — Waiting for approval: Z — Blocked for safety: W
+Recommended Founder Review: -
+```
+Status rules (`gatherApprovalActionSummary()` in `lib/approvalActionAgent.js`):
+- **Green** — approved low/medium-risk actions have executed with no failures and nothing unsafe is pending.
+- **Yellow** — approvals are waiting for a human, or exactly one execution failed.
+- **Red** — a High/Critical-risk action is waiting for approval, there have been 2+ failures, or an unsafe payload was blocked.
+
 ## Deploying to Railway
 
 1. **Push this folder to GitHub.**
@@ -1164,7 +1300,7 @@ A reasonable cadence to aim for once this is in regular use — not enforced by 
 2. **Connect the repo to Railway.**
    In the Railway dashboard, open the `adaptiv-automation-hub` service (already created) → Settings → Source → Connect Repo → select this new GitHub repo.
 3. **Environment variables.**
-   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, `NOTION_DATABASE_FILM_AI_ROADMAP` / `NOTION_DATABASE_AGENT_REPORTS` per Step 8B, `NOTION_DATABASE_COACH_CRM` / `NOTION_DATABASE_COACH_OUTREACH` per Step 9B, and `NOTION_DATABASE_SOCIAL_METRICS` / `NOTION_DATABASE_CONTENT_CALENDAR` / `NOTION_DATABASE_SOCIAL_INBOX` / `NOTION_DATABASE_SOCIAL_IDEAS` per Step 10B, if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
+   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, `NOTION_DATABASE_FILM_AI_ROADMAP` / `NOTION_DATABASE_AGENT_REPORTS` per Step 8B, `NOTION_DATABASE_COACH_CRM` / `NOTION_DATABASE_COACH_OUTREACH` per Step 9B, `NOTION_DATABASE_SOCIAL_METRICS` / `NOTION_DATABASE_CONTENT_CALENDAR` / `NOTION_DATABASE_SOCIAL_INBOX` / `NOTION_DATABASE_SOCIAL_IDEAS` per Step 10B, and `APPROVAL_ACTIONS_ENABLED` / `APPROVAL_EXECUTION_MODE` / `ENABLE_EMAIL_ACTIONS` / `ENABLE_SMS_ACTIONS` / `ENABLE_NOTION_ACTIONS` / `ENABLE_RAILWAY_ACTIONS` / `ENABLE_STRIPE_ACTIONS` / `ENABLE_SOCIAL_ACTIONS` per Step 11C (keep the last three `false`), if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
 4. **Deploy.**
    Railway will build and deploy automatically once the repo is connected. Watch the Deployments tab for build success.
 5. **Get the public URL.**
@@ -1183,7 +1319,8 @@ A reasonable cadence to aim for once this is in regular use — not enforced by 
 - Google Doc "create or update" is keyed on exact title match (`Adaptiv Daily CEO Brief - YYYY-MM-DD`). Running `/run-full-brief` more than once on the same day updates that same doc rather than creating a duplicate; running it on the next calendar day creates a new one.
 - If the final Notion write-back (saving Google Doc URL / Email Sent / Delivery Status / SMS Sent / SMS Status onto the Daily Brief row) fails after the doc/email/SMS already succeeded, that's logged to Railway logs but there's no automatic retry yet — a manual re-check of that day's Notion row covers it for now.
 - The Product/Bug Agent's "Product / Bug Agent" Daily Brief section isn't folded into the Google Doc or SMS text yet — it's in the Notion brief and in `/run-full-brief`'s JSON response (`productBugSummary`) for now. Extending `googleDeliveryAgent.js`/`smsDeliveryAgent.js` to include it is a small follow-up if wanted.
-- SMS delivery (Step 6), the Product/Bug Agent (Step 7), the Film AI Build Team planning phase (Step 8), the Coach Sales CRM Agent (Step 9), and the Social Media Agent (Step 10) are all done. Approval-Based Actions (Step 11) is the next planned phase — not started yet, and social posting stays fully manual until then (and likely after, per a separate explicit decision).
+- SMS delivery (Step 6), the Product/Bug Agent (Step 7), the Film AI Build Team planning phase (Step 8), the Coach Sales CRM Agent (Step 9), the Social Media Agent (Step 10), and the Approval Action Agent (Step 11) are all done. `ENABLE_RAILWAY_ACTIONS` / `ENABLE_STRIPE_ACTIONS` / `ENABLE_SOCIAL_ACTIONS` stay `false` — expanding the Step 11 whitelist to cover any of those is the next planned phase, not started yet, and requires a separate explicit decision after Step 11 has run safely for a while.
+- The Approval Action Agent's "Approval Action Agent" Daily Brief section isn't folded into the Google Doc or SMS text yet either, same as the other Step 7-10 sections — it's in the Notion brief and in `/run-full-brief`'s JSON response (`approvalActionSummary`) for now.
 - The Film AI Build Team is planning-only by design (Step 8H). Building the actual computer vision pipeline, uploading real athlete video, or connecting to production user data is explicitly out of scope until the privacy gate (review, consent, deletion policy, secure storage plan) is cleared — that's a founder decision, not something to build around.
 - The Film AI Build Team's "Film AI Build Team" Daily Brief section isn't folded into the Google Doc or SMS text yet either, same as the Product/Bug Agent section — it's in the Notion brief and in `/run-full-brief`'s JSON response (`filmAISummary`) for now.
 - The Coach Sales CRM Agent never contacts a coach and never marks a deal Won — every outreach send and every stage change to Won is a manual step a human takes in Notion (Step 9H). The "Coach Sales" Daily Brief section isn't folded into the Google Doc or SMS text yet either — it's in the Notion brief and in `/run-full-brief`'s JSON response (`coachSalesSummary`) for now.

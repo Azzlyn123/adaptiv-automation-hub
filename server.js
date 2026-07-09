@@ -45,6 +45,18 @@
 //     Never posts, publishes, schedules, replies, deletes, or moderates
 //     anything automatically — all enforced in lib/socialMediaAgent.js, not
 //     just documented (see Step 10).
+//   - Approval Action Agent (Step 11): the FIRST module allowed to take a
+//     real external action — but only for a row a human already flipped to
+//     Status = "Approved" in the Notion Approvals database, and only for
+//     one of exactly 6 whitelisted action types (create a Notion task, send
+//     an email to the founder, send an SMS to the founder, send an email to
+//     a coach at the address in the approved payload, update a Coach CRM
+//     lead's stage/follow-up, or mark a Coach Outreach row sent). Every
+//     other action type is rejected outright, Critical-risk and High-risk
+//     approvals can never execute in v1, and every execution result is
+//     logged back to the Approvals row (Executed + Result, or Failed +
+//     Error) — all enforced in code in lib/approvalActionAgent.js, not just
+//     documented (see Step 11).
 // Still NOT in scope:
 //   - Anything that writes to Stripe (read-only: no charges, no refunds,
 //     no subscription cancellations, no customer updates)
@@ -80,6 +92,7 @@ const productBugAgent = require('./lib/productBugAgent');
 const filmAIPlanningAgent = require('./lib/filmAIPlanningAgent');
 const coachSalesAgent = require('./lib/coachSalesAgent');
 const socialMediaAgent = require('./lib/socialMediaAgent');
+const approvalActionAgent = require('./lib/approvalActionAgent');
 
 const app = express();
 app.use(express.json());
@@ -184,12 +197,35 @@ const SOCIAL_SUMMARY_REQUIRED_ENV_VARS = [
   'NOTION_DATABASE_SOCIAL_INBOX',
 ];
 
-// Deliberately does NOT include the Step 7, Step 8, Step 9, or Step 10
-// vars — the Product/Bug, Film AI, Coach Sales, and Social Media sections
-// of /run-full-brief are all additive (see the productBugSummary,
-// filmAISummary, coachSalesSummary, and socialMediaSummary blocks in that
-// route), so a full brief still runs even before those Notion databases
-// are wired up in Railway.
+// Step 11: Approval Action Agent. /create-test-approval only needs to write
+// one Approvals row. /run-approved-actions only needs to read/write
+// Approvals — the Tasks/Coach CRM/Coach Outreach database IDs are passed
+// through as additive env values (see approvalActionEnv below) and each
+// executor in lib/approvalActionAgent.js throws its own clear error if the
+// one it specifically needs isn't configured, the same failure-isolation
+// philosophy as Step 5J/6G. APPROVAL_ACTIONS_ENABLED / APPROVAL_EXECUTION_MODE
+// are also required here — with neither of those set, /run-approved-actions
+// would just mark every approved row Failed one at a time, which is
+// confusing; better to refuse the whole request up front.
+const CREATE_TEST_APPROVAL_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_APPROVALS'];
+const RUN_APPROVED_ACTIONS_REQUIRED_ENV_VARS = [
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_APPROVALS',
+  ...approvalActionAgent.APPROVAL_ACTIONS_REQUIRED_ENV_VARS,
+];
+// Used only to decide whether /run-full-brief can fold in a live Approval
+// Action summary — deliberately just Notion + Approvals, same "additive"
+// philosophy as SOCIAL_SUMMARY_REQUIRED_ENV_VARS above. The summary is
+// read-only and never executes anything, so it doesn't need the
+// APPROVAL_ACTIONS_ENABLED/mode kill switch to be set.
+const APPROVAL_ACTION_SUMMARY_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_APPROVALS'];
+
+// Deliberately does NOT include the Step 7, Step 8, Step 9, Step 10, or
+// Step 11 vars — the Product/Bug, Film AI, Coach Sales, Social Media, and
+// Approval Action sections of /run-full-brief are all additive (see the
+// productBugSummary, filmAISummary, coachSalesSummary, socialMediaSummary,
+// and approvalActionSummary blocks in that route), so a full brief still
+// runs even before those Notion databases are wired up in Railway.
 const FULL_BRIEF_REQUIRED_ENV_VARS = [
   ...new Set([
     ...DAILY_BRIEF_REQUIRED_ENV_VARS,
@@ -902,6 +938,84 @@ app.post('/run-social-review', async (req, res) => {
   }
 });
 
+// POST /create-test-approval
+// Step 11E/11F test helper. Creates ONE row directly in the Notion Approvals
+// database with whatever action/agent/risk/tool/status/payload is passed in
+// the request body (status defaults to "Approved" if omitted). This route
+// never executes anything — it only ever creates a row, exactly the state a
+// human's manual approval would leave behind. Use this to set up both the
+// Step 11E safe-action test (Low risk, CREATE_NOTION_TASK) and the Step 11F
+// blocked-critical-action test (Critical risk, unsupported type) before
+// calling POST /run-approved-actions.
+app.post('/create-test-approval', async (req, res) => {
+  const missing = getMissingEnvVars(CREATE_TEST_APPROVAL_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  const validation = approvalActionAgent.validateTestApprovalInput(req.body);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Invalid test approval', details: validation.errors });
+  }
+
+  try {
+    const page = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_APPROVALS },
+      properties: approvalActionAgent.buildTestApprovalProperties(validation.normalized),
+    });
+    return res.status(201).json({
+      status: 'ok',
+      message: `Test approval row created with Status = "${validation.normalized.status}". Nothing was executed.`,
+      approvalPageId: page.id,
+      approvalPageUrl: page.url,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
+// POST /run-approved-actions
+// Step 11D. The ONLY route in this codebase that takes a real external
+// action. Scans the Notion Approvals database for Status = "Approved" rows
+// and, only for the 6 whitelisted action types in
+// lib/approvalActionAgent.js, executes the action and writes the result
+// back to Notion (Status -> "Executed"/"Failed", Result/Error/Executed At).
+// Requires APPROVAL_ACTIONS_ENABLED=true and APPROVAL_EXECUTION_MODE=
+// manual-safe — if either is unset, every Approved row is marked Failed
+// with that reason rather than silently doing nothing. Critical-risk and
+// High-risk approvals, and any action type outside the whitelist (e.g. a
+// Stripe refund), can never execute — see lib/approvalActionAgent.js for
+// every hard-coded safety rule.
+app.post('/run-approved-actions', async (req, res) => {
+  const missing = getMissingEnvVars(RUN_APPROVED_ACTIONS_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    const summary = await approvalActionAgent.runApprovedActions(notion, {
+      approvalsDbId: process.env.NOTION_DATABASE_APPROVALS,
+      tasksDbId: process.env.NOTION_DATABASE_TASKS || null,
+      coachCrmDbId: process.env.NOTION_DATABASE_COACH_CRM || null,
+      coachOutreachDbId: process.env.NOTION_DATABASE_COACH_OUTREACH || null,
+    });
+
+    return res.status(200).json({
+      status: 'ok',
+      message: `Processed ${summary.total} approved row(s): ${summary.executedCount} executed, ${summary.failedCount} failed, ${summary.blockedCount} blocked for safety, ${summary.skippedCount} skipped.`,
+      ...summary,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
 // POST /run-full-brief
 // Runs the Stripe revenue sync and the Railway health check (each writing
 // their own Sales/Railway Health rows and any Approval items), then creates
@@ -1008,6 +1122,23 @@ app.post('/run-full-brief', async (req, res) => {
     }
   }
 
+  // Step 11: Approval Action Agent summary. Additive like the four summaries
+  // above — a missing NOTION_DATABASE_APPROVALS or a Notion read failure
+  // here never blocks the rest of the brief. Read-only: this never approves,
+  // executes, or changes anything (that only happens from
+  // POST /run-approved-actions, and only for rows a human already approved).
+  let approvalActionSummary = null;
+  if (getMissingEnvVars(APPROVAL_ACTION_SUMMARY_REQUIRED_ENV_VARS).length === 0) {
+    try {
+      approvalActionSummary = await approvalActionAgent.gatherApprovalActionSummary(
+        notion,
+        process.env.NOTION_DATABASE_APPROVALS
+      );
+    } catch (err) {
+      console.error('[approval action agent] Failed to gather summary for daily brief (non-fatal):', err.body || err.message || err);
+    }
+  }
+
   try {
     const { salesPage, approvalPage } = await writeRevenueRecords(metrics);
     const { healthPage, approvalPages, approvalDrafts } = await writeRailwayHealthRecords(health);
@@ -1020,6 +1151,7 @@ app.post('/run-full-brief', async (req, res) => {
       filmAISummary,
       coachSalesSummary,
       socialMediaSummary,
+      approvalActionSummary,
     });
     const briefPage = await notion.pages.create({
       parent: { database_id: process.env.NOTION_DATABASE_DAILY_BRIEFS },
@@ -1084,6 +1216,7 @@ app.post('/run-full-brief', async (req, res) => {
       filmAISummary,
       coachSalesSummary,
       socialMediaSummary,
+      approvalActionSummary,
       dailyBriefUrl: briefPage.url,
       delivery,
       sms,
@@ -1369,6 +1502,7 @@ function buildDailyBriefContent({
   filmAISummary,
   coachSalesSummary,
   socialMediaSummary,
+  approvalActionSummary,
 } = {}) {
   const today = new Date();
   const dateLabel = today.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -1403,6 +1537,11 @@ function buildDailyBriefContent({
   if (!socialMediaSummary) {
     missingDataSources.push(
       'Social Media Agent (Notion Social Metrics / Content Calendar / Social Inbox not wired up yet — social posting stays manual either way)'
+    );
+  }
+  if (!approvalActionSummary) {
+    missingDataSources.push(
+      'Approval Action Agent (Notion Approvals not wired up yet — no approved actions can execute either way)'
     );
   }
 
@@ -1466,6 +1605,10 @@ function buildDailyBriefContent({
     bodyBlocks.push(...socialMediaAgent.buildSocialMediaSummaryBlocks(socialMediaSummary));
   }
 
+  if (approvalActionSummary) {
+    bodyBlocks.push(...approvalActionAgent.buildApprovalActionSummaryBlocks(approvalActionSummary));
+  }
+
   bodyBlocks.push(
     heading('Top 3 Priorities'),
     numberedList(topPriorities),
@@ -1508,6 +1651,7 @@ function buildDailyBriefContent({
     filmAISummary: filmAISummary || null,
     coachSalesSummary: coachSalesSummary || null,
     socialMediaSummary: socialMediaSummary || null,
+    approvalActionSummary: approvalActionSummary || null,
   };
 }
 
