@@ -1285,6 +1285,155 @@ Status rules (`gatherApprovalActionSummary()` in `lib/approvalActionAgent.js`):
 - **Yellow** — approvals are waiting for a human, or exactly one execution failed.
 - **Red** — a High/Critical-risk action is waiting for approval, there have been 2+ failures, or an unsafe payload was blocked.
 
+## Step 12 — Weekly Strategy + Idea System Agent
+
+Turns the daily-operator agents into a weekly founder strategy board. Reads the latest available data from Sales, Railway Health, Product Bugs, Film AI Roadmap, Coach CRM, Social Metrics, and Approvals — all optional/additive, same as the rest of this service — and, in one call, files a Weekly Strategy Review, a Weekly Scorecard, 10 scored ideas, next week's top 3 priorities as Tasks, and any founder-decision items as Approvals. **It never invents a missing metric** — a source that isn't wired up or has no data is recorded as a missing data source instead of a guessed number.
+
+### Step 12A — Notion databases
+
+Four new databases live on the Adaptiv HQ Command Center page:
+
+**Weekly Strategy Reviews**
+
+| Property | Type |
+|---|---|
+| Week | Title |
+| Status | Select (`Green` / `Yellow` / `Red`) |
+| Revenue Summary | Text |
+| Product Summary | Text |
+| Sales Summary | Text |
+| Social Summary | Text |
+| Film AI Summary | Text |
+| Risks | Text |
+| Top 3 Priorities | Text |
+| Decisions Needed | Text |
+
+**Idea Bank**
+
+| Property | Type |
+|---|---|
+| Idea | Title |
+| Category | Select (`Revenue` / `Product` / `Film AI` / `Coach Sales` / `Social` / `Operations` / `Compliance` / `Partnership`) |
+| Source Agent | Select |
+| ROI Score | Number |
+| Effort Score | Number |
+| Risk Score | Number |
+| Final Score | Number (`ROI - Effort - Risk`) |
+| Status | Select (`New` / `Reviewing` / `Approved` / `Testing` / `Rejected` / `Done` — always written `New` by this agent) |
+| Notes | Text |
+
+**Experiments** (schema only for now — no route writes to it yet; see Step 12C)
+
+| Property | Type |
+|---|---|
+| Experiment | Title |
+| Goal | Text |
+| Hypothesis | Text |
+| Owner | Text |
+| Start Date | Date |
+| End Date | Date |
+| Success Metric | Text |
+| Result | Text |
+| Status | Select (`Planned` / `Running` / `Won` / `Lost` / `Inconclusive`) |
+
+**Weekly Scorecard**
+
+| Property | Type |
+|---|---|
+| Week | Title |
+| MRR | Number |
+| New Customers | Number |
+| Coach Leads | Number |
+| Demos Booked | Number |
+| Bugs Opened | Number |
+| Bugs Fixed | Number |
+| Social Posts | Number |
+| Best Post Views | Number |
+| Film AI Progress | Select (`Not Started` / `Early` / `In Progress` / `Near Complete` / `Done`) |
+| Overall Status | Select (`Green` / `Yellow` / `Red`) |
+
+### Step 12B — Railway environment variables
+
+```
+NOTION_DATABASE_WEEKLY_STRATEGY=
+NOTION_DATABASE_IDEA_BANK=
+NOTION_DATABASE_EXPERIMENTS=
+NOTION_DATABASE_WEEKLY_SCORECARD=
+```
+No new secret keys — reuses `NOTION_API_KEY` plus the `NOTION_DATABASE_*` IDs already set for Sales, Railway Health, Product Bugs, Film AI Roadmap, Coach CRM, Social Metrics, Tasks, and Approvals.
+
+### Step 12C — What `POST /run-weekly-strategy-review` does
+
+1. Reads the latest row/state from Sales, Railway Health, Product Bugs, Film AI Roadmap, Coach CRM, Social Metrics, and Approvals (each skipped — not failed — if its database ID isn't set).
+2. Computes an overall `Green`/`Yellow`/`Red` status from real signals (critical bugs, Railway health, high-risk approvals waiting, past-due subscriptions, missing sources).
+3. Generates 10 scored ideas (2 Revenue, 2 Product, 2 Film AI, 2 Coach Sales, 1 Social, 1 Compliance/Risk) — deterministic, no external LLM call, using live context (a real open bug, a real blocked Film AI task, a real top coach lead) where available and the Step 12G example ideas as a fallback. Writes all 10 to Idea Bank as `Status: New`.
+4. Picks the top 3 ideas by Final Score as next week's priorities and creates one Tasks row per priority (skipped if `NOTION_DATABASE_TASKS` isn't set).
+5. Files an Approvals row (`Status: Needs Approval`) for every Revenue or Compliance idea — these need a founder decision before anyone acts on them (skipped if `NOTION_DATABASE_APPROVALS` isn't set).
+6. Writes one Weekly Strategy Review row (with the full 11-section report in the page body) and one Weekly Scorecard row.
+
+### Step 12D — Weekly review report format
+
+The Weekly Strategy Review page body follows this exact structure:
+```
+# Adaptiv Weekly Strategy Review
+Week: ...
+Overall Status: Green / Yellow / Red
+## 1. Executive Summary
+## 2. Revenue
+## 3. Product / App
+## 4. Railway / App Health
+## 5. Coach Sales
+## 6. Film AI
+## 7. Social Media
+## 8. Risks
+## 9. Top 10 Ideas
+## 10. Next Week's Top 3 Priorities
+## 11. Founder Decisions Needed
+```
+
+### Step 12E — Test it
+
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-weekly-strategy-review
+```
+Expected:
+1. A new row in Weekly Strategy Reviews.
+2. A new row in Weekly Scorecard.
+3. 10 new rows in Idea Bank.
+4. Up to 3 new rows in Tasks (if `NOTION_DATABASE_TASKS` is set).
+5. Approval items in Approvals for any Revenue/Compliance idea (if `NOTION_DATABASE_APPROVALS` is set).
+
+Then:
+```
+curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+```
+Expected: the Daily Brief includes a short "Weekly Strategy" section if a review was created in the last 8 days.
+
+### Step 12F — Weekly schedule
+
+Runs every **Sunday at 8:30 PM Phoenix time (MST, UTC-7, no DST)** — chosen because you're typically available 8-11 PM Sunday, so you can review the strategy before Monday starts. The scheduled job calls `POST /run-weekly-strategy-review` and then `POST /run-full-brief` (so a summary goes out by email the same way the daily brief does).
+
+### Step 12G — Example ideas this agent generates
+
+- **Revenue:** Offer a founding coach/team discount for the first 5 accounts.
+- **Product:** Add a coach onboarding checklist.
+- **Film AI:** Build a volleyball hitting demo with 3 sample clips.
+- **Coach Sales:** Target 10 Phoenix volleyball coaches this week.
+- **Social:** Post a "building Film AI for volleyball" series.
+- **Compliance:** Add privacy language before storing athlete videos.
+
+### Step 12H — What this agent must NOT automate yet
+
+It only ever recommends and requests approval for:
+- Changing pricing
+- Launching a campaign
+- Sending coach emails
+- Posting content
+- Changing the app roadmap
+- Deploying Film AI
+- Spending money
+- Signing contracts
+
 ## Deploying to Railway
 
 1. **Push this folder to GitHub.**
@@ -1300,7 +1449,7 @@ Status rules (`gatherApprovalActionSummary()` in `lib/approvalActionAgent.js`):
 2. **Connect the repo to Railway.**
    In the Railway dashboard, open the `adaptiv-automation-hub` service (already created) → Settings → Source → Connect Repo → select this new GitHub repo.
 3. **Environment variables.**
-   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, `NOTION_DATABASE_FILM_AI_ROADMAP` / `NOTION_DATABASE_AGENT_REPORTS` per Step 8B, `NOTION_DATABASE_COACH_CRM` / `NOTION_DATABASE_COACH_OUTREACH` per Step 9B, `NOTION_DATABASE_SOCIAL_METRICS` / `NOTION_DATABASE_CONTENT_CALENDAR` / `NOTION_DATABASE_SOCIAL_INBOX` / `NOTION_DATABASE_SOCIAL_IDEAS` per Step 10B, and `APPROVAL_ACTIONS_ENABLED` / `APPROVAL_EXECUTION_MODE` / `ENABLE_EMAIL_ACTIONS` / `ENABLE_SMS_ACTIONS` / `ENABLE_NOTION_ACTIONS` / `ENABLE_RAILWAY_ACTIONS` / `ENABLE_STRIPE_ACTIONS` / `ENABLE_SOCIAL_ACTIONS` per Step 11C (keep the last three `false`), if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
+   `NOTION_API_KEY` and all `NOTION_DATABASE_*` IDs (including Sales, Approvals, and Railway Health) should already be set from earlier steps. Add `STRIPE_RESTRICTED_KEY` and the three `STRIPE_PRICE_*` IDs per Step 3B, `RAILWAY_API_TOKEN` / `RAILWAY_FRONTEND_SERVICE` / `RAILWAY_BACKEND_SERVICE` / `BACKEND_HEALTH_URL` per Step 4B, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `FOUNDER_EMAIL` / `GOOGLE_DOC_FOLDER_ID` per Step 5D, `SMS_ENABLED` / `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` / `FOUNDER_PHONE_NUMBER` per Step 6B (optional — leave `SMS_ENABLED` unset/false to skip), `NOTION_DATABASE_PRODUCT_BUGS` / `NOTION_DATABASE_BETA_FEEDBACK` / `NOTION_DATABASE_TASKS` per Step 7B, `NOTION_DATABASE_FILM_AI_ROADMAP` / `NOTION_DATABASE_AGENT_REPORTS` per Step 8B, `NOTION_DATABASE_COACH_CRM` / `NOTION_DATABASE_COACH_OUTREACH` per Step 9B, `NOTION_DATABASE_SOCIAL_METRICS` / `NOTION_DATABASE_CONTENT_CALENDAR` / `NOTION_DATABASE_SOCIAL_INBOX` / `NOTION_DATABASE_SOCIAL_IDEAS` per Step 10B, `APPROVAL_ACTIONS_ENABLED` / `APPROVAL_EXECUTION_MODE` / `ENABLE_EMAIL_ACTIONS` / `ENABLE_SMS_ACTIONS` / `ENABLE_NOTION_ACTIONS` / `ENABLE_RAILWAY_ACTIONS` / `ENABLE_STRIPE_ACTIONS` / `ENABLE_SOCIAL_ACTIONS` per Step 11C (keep the last three `false`), and `NOTION_DATABASE_WEEKLY_STRATEGY` / `NOTION_DATABASE_IDEA_BANK` / `NOTION_DATABASE_EXPERIMENTS` / `NOTION_DATABASE_WEEKLY_SCORECARD` per Step 12B, if you haven't already. `GOOGLE_REFRESH_TOKEN` comes later, from Step 5G.
 4. **Deploy.**
    Railway will build and deploy automatically once the repo is connected. Watch the Deployments tab for build success.
 5. **Get the public URL.**
@@ -1327,3 +1476,7 @@ Status rules (`gatherApprovalActionSummary()` in `lib/approvalActionAgent.js`):
 - Coach Sales progress against the first-sales target (25 leads / 10 outreach drafts / 3 conversations / 1 demo booked — Step 9G) should be checked periodically via `/run-coach-sales-review` or the Daily Brief; nothing auto-notifies when the target is hit.
 - The Social Media Agent never posts, replies, deletes, or moderates anything on any platform (Step 10H) — every draft it creates is filed as "Needs Approval" with `Approved: false`, and posting/replying/moderating stays a manual step a human takes directly on each platform. The "Social Media" Daily Brief section isn't folded into the Google Doc or SMS text yet either, same as the other Step 7-9 sections — it's in the Notion brief and in `/run-full-brief`'s JSON response (`socialMediaSummary`) for now.
 - Social Ideas (`NOTION_DATABASE_SOCIAL_IDEAS`) is currently populated manually — no route in this service writes new ideas into it yet. `/run-social-review` and `/run-full-brief` only read its backlog count.
+- The Weekly Strategy + Idea System Agent (Step 12) is done — the first system in this codebase that reads across every other agent's Notion database in one call. It never approves an idea and never takes any Step 12H action (pricing, campaigns, coach emails, posting, roadmap changes, Film AI deploys, spending, contracts) automatically; those all stay founder decisions filed to Approvals. The "Weekly Strategy" Daily Brief section isn't folded into the Google Doc or SMS text yet either, same as the other cross-agent summaries — it's in the Notion brief and in `/run-full-brief`'s JSON response (`weeklyStrategySummary`) for now.
+- Experiments (`NOTION_DATABASE_EXPERIMENTS`) schema exists but no route writes to it automatically yet — Step 12C's build list never has the weekly agent create an Experiment row. `weeklyStrategyAgent.buildExperimentProperties()` is exported and ready for a future manual/API route if wanted.
+- "Bugs Fixed" on the Weekly Scorecard is an approximation (Product Bugs has no resolution-date property) — it counts bugs whose Status is no longer open AND whose Notion `last_edited_time` falls in the last 7 days, not a guaranteed-accurate weekly fix count. Documented in the Product Summary text on every review.
+- This is the end of the first full build. Daily CEO Brief, Stripe Revenue Agent, Railway Health Agent, Product/Bug Agent, Film AI Planning Team, Coach Sales CRM Agent, Social Media Agents, Approval-Based Actions, and the Weekly Strategy Agent are all live. The next phase is optimization, not setup: cleaner dashboards, better agent prompts, real social API connections, the actual Film AI service build, coach pipeline execution, and expanding the Step 11 approval-action whitelist — each a deliberate, separate decision, not something to build reflexively.

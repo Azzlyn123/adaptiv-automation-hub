@@ -57,6 +57,15 @@
 //     logged back to the Approvals row (Executed + Result, or Failed +
 //     Error) — all enforced in code in lib/approvalActionAgent.js, not just
 //     documented (see Step 11).
+//   - Weekly Strategy + Idea System (Step 12): reads the latest data from
+//     every other agent's Notion database, files one Weekly Strategy Review
+//     + one Weekly Scorecard row, generates 10 scored ideas into the Idea
+//     Bank, creates Tasks for next week's top 3 priorities, and files
+//     Approval requests for any idea that needs a founder decision. Never
+//     approves an idea, never invents a missing metric, and never posts,
+//     emails, deploys, refunds, deletes, or changes billing — all enforced
+//     in code in lib/weeklyStrategyAgent.js, not just documented (see
+//     Step 12).
 // Still NOT in scope:
 //   - Anything that writes to Stripe (read-only: no charges, no refunds,
 //     no subscription cancellations, no customer updates)
@@ -93,6 +102,7 @@ const filmAIPlanningAgent = require('./lib/filmAIPlanningAgent');
 const coachSalesAgent = require('./lib/coachSalesAgent');
 const socialMediaAgent = require('./lib/socialMediaAgent');
 const approvalActionAgent = require('./lib/approvalActionAgent');
+const weeklyStrategyAgent = require('./lib/weeklyStrategyAgent');
 
 const app = express();
 app.use(express.json());
@@ -220,12 +230,33 @@ const RUN_APPROVED_ACTIONS_REQUIRED_ENV_VARS = [
 // APPROVAL_ACTIONS_ENABLED/mode kill switch to be set.
 const APPROVAL_ACTION_SUMMARY_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_APPROVALS'];
 
-// Deliberately does NOT include the Step 7, Step 8, Step 9, Step 10, or
-// Step 11 vars — the Product/Bug, Film AI, Coach Sales, Social Media, and
-// Approval Action sections of /run-full-brief are all additive (see the
-// productBugSummary, filmAISummary, coachSalesSummary, socialMediaSummary,
-// and approvalActionSummary blocks in that route), so a full brief still
-// runs even before those Notion databases are wired up in Railway.
+// Step 12: Weekly Strategy + Idea System. Only the 3 databases this route
+// actually writes to every run are required — Sales, Railway Health,
+// Product Bugs, Film AI Roadmap, Coach CRM, Social Metrics, Tasks, and
+// Approvals are all read/written additively inside
+// weeklyStrategyAgent.gatherWeeklyContext() and the route handler itself
+// (a missing one is recorded as a missing data source, never blocks the
+// route), same "additive" philosophy as every other cross-agent read in
+// this codebase.
+const WEEKLY_STRATEGY_REVIEW_REQUIRED_ENV_VARS = [
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_WEEKLY_STRATEGY',
+  'NOTION_DATABASE_IDEA_BANK',
+  'NOTION_DATABASE_WEEKLY_SCORECARD',
+];
+// Used only to decide whether /run-full-brief can fold in a live Weekly
+// Strategy summary — deliberately just Notion + Weekly Strategy, same
+// "additive" philosophy as the other *_SUMMARY_REQUIRED_ENV_VARS above. The
+// summary is read-only and never creates a review itself.
+const WEEKLY_STRATEGY_SUMMARY_REQUIRED_ENV_VARS = ['NOTION_API_KEY', 'NOTION_DATABASE_WEEKLY_STRATEGY'];
+
+// Deliberately does NOT include the Step 7, Step 8, Step 9, Step 10, Step 11,
+// or Step 12 vars — the Product/Bug, Film AI, Coach Sales, Social Media,
+// Approval Action, and Weekly Strategy sections of /run-full-brief are all
+// additive (see the productBugSummary, filmAISummary, coachSalesSummary,
+// socialMediaSummary, approvalActionSummary, and weeklyStrategySummary
+// blocks in that route), so a full brief still runs even before those
+// Notion databases are wired up in Railway.
 const FULL_BRIEF_REQUIRED_ENV_VARS = [
   ...new Set([
     ...DAILY_BRIEF_REQUIRED_ENV_VARS,
@@ -1016,6 +1047,133 @@ app.post('/run-approved-actions', async (req, res) => {
   }
 });
 
+// POST /run-weekly-strategy-review
+// Step 12. Reads the latest available data from Sales, Railway Health,
+// Product Bugs, Film AI Roadmap, Coach CRM, Social Metrics, and Approvals
+// (each optional/additive — a missing database is recorded as a missing
+// data source, never invented), files one Weekly Strategy Review row and
+// one Weekly Scorecard row, generates 10 scored ideas into the Idea Bank,
+// creates a Tasks row for each of next week's top 3 priorities (if
+// NOTION_DATABASE_TASKS is set), and files an Approvals row for any idea
+// that needs a founder decision (if NOTION_DATABASE_APPROVALS is set).
+// Never approves an idea, never posts/emails/deploys/refunds/deletes/changes
+// billing — see SAFETY_RULES in lib/weeklyStrategyAgent.js.
+app.post('/run-weekly-strategy-review', async (req, res) => {
+  const missing = getMissingEnvVars(WEEKLY_STRATEGY_REVIEW_REQUIRED_ENV_VARS);
+  if (missing.length > 0) {
+    return res.status(500).json({
+      error: 'Missing required environment variables',
+      missing,
+    });
+  }
+
+  try {
+    const context = await weeklyStrategyAgent.gatherWeeklyContext(notion, {
+      salesDbId: process.env.NOTION_DATABASE_SALES || null,
+      railwayHealthDbId: process.env.NOTION_DATABASE_RAILWAY_HEALTH || null,
+      productBugsDbId: process.env.NOTION_DATABASE_PRODUCT_BUGS || null,
+      filmAIRoadmapDbId: process.env.NOTION_DATABASE_FILM_AI_ROADMAP || null,
+      coachCrmDbId: process.env.NOTION_DATABASE_COACH_CRM || null,
+      socialMetricsDbId: process.env.NOTION_DATABASE_SOCIAL_METRICS || null,
+      approvalsDbId: process.env.NOTION_DATABASE_APPROVALS || null,
+    });
+
+    const status = weeklyStrategyAgent.computeOverallStatus(context);
+    const label = weeklyStrategyAgent.weekLabel();
+    const ideas = weeklyStrategyAgent.generateIdeas(context);
+    const priorities = weeklyStrategyAgent.topPriorities(ideas, 3);
+    const decisionIdeas = weeklyStrategyAgent.ideasNeedingFounderDecision(ideas);
+
+    // Idea Bank — all 10 ideas, always filed as Status "New".
+    const ideaPages = [];
+    for (const idea of ideas) {
+      const page = await notion.pages.create({
+        parent: { database_id: process.env.NOTION_DATABASE_IDEA_BANK },
+        properties: weeklyStrategyAgent.buildIdeaProperties(idea),
+      });
+      ideaPages.push({ title: idea.title, category: idea.category, finalScore: idea.finalScore, url: page.url });
+    }
+
+    // Tasks — one per top-3 priority. Additive: skipped (not failed) if
+    // NOTION_DATABASE_TASKS isn't configured yet, same pattern as Step 7/9.
+    const taskPages = [];
+    if (process.env.NOTION_DATABASE_TASKS) {
+      for (const priority of priorities) {
+        const page = await notion.pages.create({
+          parent: { database_id: process.env.NOTION_DATABASE_TASKS },
+          properties: weeklyStrategyAgent.buildPriorityTaskProperties(priority, label),
+        });
+        taskPages.push(page.url);
+      }
+    }
+
+    // Approvals — one per idea needing a founder decision. Additive: skipped
+    // (not failed) if NOTION_DATABASE_APPROVALS isn't configured yet.
+    const approvalPages = [];
+    if (process.env.NOTION_DATABASE_APPROVALS) {
+      for (const idea of decisionIdeas) {
+        const page = await notion.pages.create({
+          parent: { database_id: process.env.NOTION_DATABASE_APPROVALS },
+          properties: weeklyStrategyAgent.buildFounderDecisionApprovalProperties(idea, label),
+        });
+        approvalPages.push(page.url);
+      }
+    }
+
+    // Weekly Strategy Review row + full 11-section report in the page body.
+    const reviewProperties = weeklyStrategyAgent.buildWeeklyStrategyReviewProperties({
+      weekLabel: label,
+      status,
+      revenueSummary: weeklyStrategyAgent.summarizeRevenue(context.sales),
+      productSummary: weeklyStrategyAgent.summarizeProduct(context.productBugs),
+      salesSummary: weeklyStrategyAgent.summarizeCoachSales(context.coachSales),
+      socialSummary: weeklyStrategyAgent.summarizeSocial(context.social),
+      filmAISummary: weeklyStrategyAgent.summarizeFilmAI(context.filmAI),
+      risks: weeklyStrategyAgent.summarizeRisks(context),
+      priorityLines: priorities.map((p) => p.title),
+      decisionLines: decisionIdeas.map((i) => i.title),
+    });
+    const reviewPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_WEEKLY_STRATEGY },
+      properties: reviewProperties,
+      children: weeklyStrategyAgent.buildWeeklyReviewBlocks({ label, status, context, ideas, priorities, decisionIdeas }),
+    });
+
+    // Weekly Scorecard row.
+    const scorecardPage = await notion.pages.create({
+      parent: { database_id: process.env.NOTION_DATABASE_WEEKLY_SCORECARD },
+      properties: weeklyStrategyAgent.buildWeeklyScorecardProperties({
+        weekLabel: label,
+        mrr: context.sales ? context.sales.mrr : null,
+        newCustomers: context.sales ? context.sales.newSubs : null,
+        coachLeads: context.coachSales ? context.coachSales.newLeadsThisWeek : null,
+        demosBooked: context.coachSales ? context.coachSales.demosThisWeek : null,
+        bugsOpened: context.productBugs ? context.productBugs.openedThisWeek : null,
+        bugsFixed: context.productBugs ? context.productBugs.fixedThisWeek : null,
+        socialPosts: context.social ? context.social.postsThisWeekCount : null,
+        bestPostViews: context.social && context.social.bestPost ? context.social.bestPost.views : null,
+        filmAIProgressLabel: weeklyStrategyAgent.filmAIProgressLabel(context.filmAI),
+        overallStatus: status,
+      }),
+    });
+
+    return res.status(201).json({
+      status: 'ok',
+      message: `Weekly Strategy Review complete: ${ideaPages.length} ideas filed, ${taskPages.length} priority task(s) created, ${approvalPages.length} founder decision(s) filed for approval. Nothing was approved, posted, emailed, or deployed automatically.`,
+      week: label,
+      overallStatus: status,
+      missingDataSources: context.missing,
+      reviewPageUrl: reviewPage.url,
+      scorecardPageUrl: scorecardPage.url,
+      ideasCreated: ideaPages,
+      priorityTasksCreated: taskPages,
+      founderApprovalsCreated: approvalPages,
+    });
+  } catch (err) {
+    return handleNotionError(res, err);
+  }
+});
+
 // POST /run-full-brief
 // Runs the Stripe revenue sync and the Railway health check (each writing
 // their own Sales/Railway Health rows and any Approval items), then creates
@@ -1139,6 +1297,25 @@ app.post('/run-full-brief', async (req, res) => {
     }
   }
 
+  // Step 12: Weekly Strategy summary. Additive like the five summaries
+  // above — a missing NOTION_DATABASE_WEEKLY_STRATEGY or a Notion read
+  // failure here never blocks the rest of the brief. Read-only: this never
+  // creates a review, an idea, a task, or an approval itself (that only
+  // happens from POST /run-weekly-strategy-review). Also returns null if the
+  // latest review is more than 8 days old, so a stale review never appears
+  // in a daily brief as if it were current.
+  let weeklyStrategySummary = null;
+  if (getMissingEnvVars(WEEKLY_STRATEGY_SUMMARY_REQUIRED_ENV_VARS).length === 0) {
+    try {
+      weeklyStrategySummary = await weeklyStrategyAgent.gatherLatestWeeklyReviewSummary(
+        notion,
+        process.env.NOTION_DATABASE_WEEKLY_STRATEGY
+      );
+    } catch (err) {
+      console.error('[weekly strategy agent] Failed to gather summary for daily brief (non-fatal):', err.body || err.message || err);
+    }
+  }
+
   try {
     const { salesPage, approvalPage } = await writeRevenueRecords(metrics);
     const { healthPage, approvalPages, approvalDrafts } = await writeRailwayHealthRecords(health);
@@ -1152,6 +1329,7 @@ app.post('/run-full-brief', async (req, res) => {
       coachSalesSummary,
       socialMediaSummary,
       approvalActionSummary,
+      weeklyStrategySummary,
     });
     const briefPage = await notion.pages.create({
       parent: { database_id: process.env.NOTION_DATABASE_DAILY_BRIEFS },
@@ -1217,6 +1395,7 @@ app.post('/run-full-brief', async (req, res) => {
       coachSalesSummary,
       socialMediaSummary,
       approvalActionSummary,
+      weeklyStrategySummary,
       dailyBriefUrl: briefPage.url,
       delivery,
       sms,
@@ -1503,6 +1682,7 @@ function buildDailyBriefContent({
   coachSalesSummary,
   socialMediaSummary,
   approvalActionSummary,
+  weeklyStrategySummary,
 } = {}) {
   const today = new Date();
   const dateLabel = today.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -1542,6 +1722,11 @@ function buildDailyBriefContent({
   if (!approvalActionSummary) {
     missingDataSources.push(
       'Approval Action Agent (Notion Approvals not wired up yet — no approved actions can execute either way)'
+    );
+  }
+  if (!weeklyStrategySummary) {
+    missingDataSources.push(
+      'Weekly Strategy Agent (Notion Weekly Strategy Reviews not wired up yet, or no review created in the last 8 days — run POST /run-weekly-strategy-review)'
     );
   }
 
@@ -1609,6 +1794,10 @@ function buildDailyBriefContent({
     bodyBlocks.push(...approvalActionAgent.buildApprovalActionSummaryBlocks(approvalActionSummary));
   }
 
+  if (weeklyStrategySummary) {
+    bodyBlocks.push(...weeklyStrategyAgent.buildWeeklyStrategySummaryBlocks(weeklyStrategySummary));
+  }
+
   bodyBlocks.push(
     heading('Top 3 Priorities'),
     numberedList(topPriorities),
@@ -1652,6 +1841,7 @@ function buildDailyBriefContent({
     coachSalesSummary: coachSalesSummary || null,
     socialMediaSummary: socialMediaSummary || null,
     approvalActionSummary: approvalActionSummary || null,
+    weeklyStrategySummary: weeklyStrategySummary || null,
   };
 }
 
