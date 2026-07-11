@@ -1340,6 +1340,12 @@ app.post('/run-full-brief', async (req, res) => {
     // Step 5: Google Doc + email delivery. This never throws and never
     // blocks this response — a missing Google setup or a delivery failure
     // just gets recorded on the Notion row below instead (Step 5J).
+    // Bug fix (Phase 2 accuracy test, 2026-07-10): this call used to only
+    // pass the Step 1-4 fields, so the Google Doc silently never included
+    // Product/Bug, Film AI, Coach Sales, Social Media, Approval Action, or
+    // Weekly Strategy sections even though buildDailyBriefContent() already
+    // computed all of them (they're on `brief` specifically so this call
+    // could use them — see the comment above buildDailyBriefContent).
     const delivery = await googleDeliveryAgent.deliverDailyBrief({
       dateLabel: brief.dateLabel,
       displayDate: brief.displayDate,
@@ -1347,6 +1353,12 @@ app.post('/run-full-brief', async (req, res) => {
       topPriorities: brief.topPriorities,
       salesMetrics: metrics,
       railwayHealth: health,
+      productBugSummary: brief.productBugSummary,
+      filmAISummary: brief.filmAISummary,
+      coachSalesSummary: brief.coachSalesSummary,
+      socialMediaSummary: brief.socialMediaSummary,
+      approvalActionSummary: brief.approvalActionSummary,
+      weeklyStrategySummary: brief.weeklyStrategySummary,
       missingDataSources: brief.missingDataSources,
       founderTodos: brief.founderTodos,
       approvalRequests: brief.approvalRequests,
@@ -1692,11 +1704,31 @@ function buildDailyBriefContent({
     day: 'numeric',
   });
 
-  const topPriorities = [
-    'Connect Notion to Railway Automation Hub',
-    'Missing data sources — see below',
-    'Confirm daily brief format with founder',
-  ];
+  // Computed from real signals, in priority order: the Weekly Strategy
+  // Agent's top-3 (if a review ran in the last 8 days) first, then the top
+  // open product bug, then the top Railway error — falling back to the
+  // original structural placeholder only when none of those are available
+  // yet (e.g. a bare /run-daily-brief test call with no arguments). Bug: this
+  // used to be hardcoded and never changed across any brief — found during
+  // the Phase 2 7-day accuracy test (2026-07-10).
+  const priorityCandidates = [];
+  if (weeklyStrategySummary && weeklyStrategySummary.topPriorities) {
+    priorityCandidates.push(...weeklyStrategySummary.topPriorities.split(' | ').filter(Boolean));
+  }
+  if (productBugSummary && productBugSummary.recommendedFixToday) {
+    priorityCandidates.push(`Fix: ${productBugSummary.recommendedFixToday}`);
+  }
+  if (railwayHealth && railwayHealth.errors && railwayHealth.errors.length > 0) {
+    priorityCandidates.push(`Railway: ${railwayHealth.errors[0]}`);
+  }
+  const topPriorities =
+    priorityCandidates.length > 0
+      ? priorityCandidates.slice(0, 3)
+      : [
+          'Connect Notion to Railway Automation Hub',
+          'Missing data sources — see below',
+          'Confirm daily brief format with founder',
+        ];
 
   const missingDataSources = [];
   if (!railwayHealth) {
@@ -1746,6 +1778,20 @@ function buildDailyBriefContent({
     for (const approval of railwayApprovals) {
       approvalRequests.push(`${approval.properties.Action.title[0].text.content} — see Approvals database.`);
     }
+  }
+  // Bug fix (Phase 2 accuracy test, 2026-07-10): this section used to only
+  // ever include Stripe past-due and Railway approvals — Weekly Strategy
+  // founder decisions and other pending Approval Action items never showed
+  // up here even though they existed in Notion.
+  if (weeklyStrategySummary && weeklyStrategySummary.decisionsNeeded) {
+    for (const decision of weeklyStrategySummary.decisionsNeeded.split(' | ').filter(Boolean)) {
+      approvalRequests.push(`Decide: ${decision} — see Approvals database.`);
+    }
+  }
+  if (approvalActionSummary && approvalActionSummary.waitingCount > 0) {
+    approvalRequests.push(
+      `${approvalActionSummary.waitingCount} other approval(s) waiting for founder review — see Approvals database.`
+    );
   }
   if (approvalRequests.length === 0) {
     approvalRequests.push('None yet — no items currently need founder approval.');
