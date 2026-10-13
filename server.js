@@ -1350,6 +1350,9 @@ app.post('/run-full-brief', async (req, res) => {
       dateLabel: brief.dateLabel,
       displayDate: brief.displayDate,
       statusLabel: brief.statusLabel,
+      releaseBlockers: brief.releaseBlockers,
+      featureGates: brief.featureGates,
+      sourceCautions: brief.sourceCautions,
       topPriorities: brief.topPriorities,
       salesMetrics: metrics,
       railwayHealth: health,
@@ -1393,8 +1396,8 @@ app.post('/run-full-brief', async (req, res) => {
     }
 
     return res.status(201).json({
-      status: 'ok',
-      message: 'Revenue sync + Railway health + daily brief + delivery + SMS complete.',
+      status: delivery.deliveryStatus === 'Sent' && sms.smsStatus !== 'Failed' ? 'ok' : 'partial',
+      message: 'Daily brief saved in Notion. Google and SMS delivery outcomes are reported separately below.',
       metrics,
       salesPageUrl: salesPage.url,
       approvalCreated: Boolean(approvalPage),
@@ -1418,65 +1421,18 @@ app.post('/run-full-brief', async (req, res) => {
 });
 
 // GET /auth/google
-// Step 5G: one-time setup route. Redirects the founder to Google's OAuth
-// consent screen. Visit this in a browser, not curl — it's a redirect meant
-// for a human to click through.
+// Former browser setup route is disabled. New credentials require a
+// separately reviewed, owner-run local setup without token disclosure.
 app.get('/auth/google', (req, res) => {
-  const missing = googleDeliveryAgent.getMissingEnvVars(googleDeliveryAgent.OAUTH_SETUP_REQUIRED_ENV_VARS);
-  if (missing.length > 0) {
-    return res.status(500).json({
-      error: 'Missing required environment variables',
-      missing,
-    });
-  }
-
-  return res.redirect(googleDeliveryAgent.getAuthUrl());
+  return res.status(410).json({ error: 'Browser credential setup is disabled. Use an owner-run local OAuth setup instead.' });
 });
 
 // GET /oauth2callback
 // Step 5G: Google redirects here after consent, with a one-time ?code=.
-// Exchanges it for tokens and shows the refresh token ONCE so it can be
-// copied into Railway as GOOGLE_REFRESH_TOKEN. This route is the setup
-// flow itself, so displaying the token here is intentional — no other
-// route in this service ever exposes it.
+// The former public callback exposed refresh tokens. Keep it disabled;
+// a replacement must exchange/store credentials locally without logging them.
 app.get('/oauth2callback', async (req, res) => {
-  const missing = googleDeliveryAgent.getMissingEnvVars(googleDeliveryAgent.OAUTH_SETUP_REQUIRED_ENV_VARS);
-  if (missing.length > 0) {
-    return res.status(500).json({
-      error: 'Missing required environment variables',
-      missing,
-    });
-  }
-
-  const code = req.query.code;
-  if (!code) {
-    return res.status(400).json({ error: 'Missing ?code= from Google OAuth redirect.' });
-  }
-
-  try {
-    const tokens = await googleDeliveryAgent.exchangeCodeForTokens(code);
-
-    if (tokens.refresh_token) {
-      console.log('[google oauth setup] Refresh token (copy this into Railway as GOOGLE_REFRESH_TOKEN):');
-      console.log(tokens.refresh_token);
-    } else {
-      console.warn(
-        '[google oauth setup] No refresh_token in the response — Google only issues one on first consent. ' +
-          'If you already authorized this app before, revoke access at https://myaccount.google.com/permissions ' +
-          'and visit /auth/google again.'
-      );
-    }
-
-    return res.status(200).json({
-      status: 'ok',
-      message: tokens.refresh_token
-        ? 'Authorization complete. Copy refreshToken below into Railway as GOOGLE_REFRESH_TOKEN, then redeploy. Keep it private.'
-        : 'Authorization complete, but no refresh token was issued (already authorized before). Revoke access at https://myaccount.google.com/permissions and try /auth/google again to force a new one.',
-      refreshToken: tokens.refresh_token || null,
-    });
-  } catch (err) {
-    return handleGoogleError(res, err);
-  }
+  return res.status(410).json({ error: 'Browser credential setup is disabled. No authorization code was exchanged.' });
 });
 
 // POST /create-test-doc
@@ -1704,31 +1660,69 @@ function buildDailyBriefContent({
     day: 'numeric',
   });
 
-  // Computed from real signals, in priority order: the Weekly Strategy
-  // Agent's top-3 (if a review ran in the last 8 days) first, then the top
-  // open product bug, then the top Railway error — falling back to the
-  // original structural placeholder only when none of those are available
-  // yet (e.g. a bare /run-daily-brief test call with no arguments). Bug: this
-  // used to be hardcoded and never changed across any brief — found during
-  // the Phase 2 7-day accuracy test (2026-07-10).
-  const priorityCandidates = [];
-  if (weeklyStrategySummary && weeklyStrategySummary.topPriorities) {
-    priorityCandidates.push(...weeklyStrategySummary.topPriorities.split(' | ').filter(Boolean));
+  // A reported Critical issue is a verification task, not a confirmed outage.
+  // Film AI's privacy gate applies to that feature, not the whole company.
+  const releaseBlockers = [];
+  if (productBugSummary && Array.isArray(productBugSummary.verifiedCriticalBugs)) {
+    for (const bug of productBugSummary.verifiedCriticalBugs) {
+      releaseBlockers.push(`${bug.title} — Critical — owner: Product/Bug Agent`);
+    }
   }
-  if (productBugSummary && productBugSummary.recommendedFixToday) {
-    priorityCandidates.push(`Fix: ${productBugSummary.recommendedFixToday}`);
+  const featureGates = [];
+  if (filmAISummary && filmAISummary.privacyGateCleared === false) {
+    featureGates.push('Real athlete video for Film AI remains gated until privacy requirements are cleared.');
+  }
+  const sourceCautions = [];
+  if (railwayHealth && railwayHealth.database && railwayHealth.database.color === 'UNKNOWN') {
+    sourceCautions.push('Database monitoring is not wired up; database status is Unknown, not Failed.');
+  }
+  if (productBugSummary && productBugSummary.unverifiedCriticalBugs.length > 0) {
+    sourceCautions.push(`${productBugSummary.unverifiedCriticalBugs.length} reported Critical bug(s) need reproduction and QA evidence before they count as confirmed.`);
+  }
+  if (coachSalesSummary && coachSalesSummary.excludedTestCount > 0) {
+    sourceCautions.push(`${coachSalesSummary.excludedTestCount} known demo sales row(s) were excluded.`);
+  }
+  if (socialMediaSummary && (socialMediaSummary.excludedTestPostCount > 0 || socialMediaSummary.unverifiedPostCount > 0)) {
+    sourceCautions.push(`${socialMediaSummary.excludedTestPostCount} test social post(s) excluded; ${socialMediaSummary.unverifiedPostCount} unsourced post row(s) not counted as verified performance.`);
+  }
+  if (approvalActionSummary && (approvalActionSummary.repeatedWaitingCount > 0 || approvalActionSummary.testRowCount > 0)) {
+    sourceCautions.push(`${approvalActionSummary.repeatedWaitingCount} repeated approval row(s) grouped; ${approvalActionSummary.testRowCount} test row(s) excluded.`);
+  }
+  if (weeklyStrategySummary && weeklyStrategySummary.topPriorities) {
+    sourceCautions.push('Weekly Strategy priorities are agent-generated proposals; their source evidence has not been independently verified for this brief.');
+  }
+  if (salesMetrics) {
+    sourceCautions.push('Stripe subscription MRR is an API snapshot; account mode and invoices are not reconciled by this brief.');
+  }
+
+  // Verified blockers and concrete verification work precede operational
+  // errors. Strategy proposals remain in their own section until sourced.
+  const priorityCandidates = [];
+  for (const blocker of releaseBlockers) {
+    priorityCandidates.push(`Blocker: ${blocker}`);
+  }
+  if (productBugSummary && productBugSummary.unverifiedCriticalBugs.length > 0) {
+    priorityCandidates.push(`Verify reported Critical issue: ${productBugSummary.unverifiedCriticalBugs[0].title}`);
+  }
+  // The latest strategy review can contain sample-derived ideas. Keep its
+  // recommendations visible in its own section, but do not promote them to
+  // today's operational priorities without source verification.
+  if (productBugSummary && productBugSummary.recommendedFixToday && !productBugSummary.recommendedFixToday.startsWith('Verify report:')) {
+    const fixTitle = productBugSummary.recommendedFixToday.split(' (')[0];
+    const alreadyListed = priorityCandidates.some((p) => p.includes(fixTitle));
+    if (!alreadyListed) {
+      priorityCandidates.push(`Fix: ${productBugSummary.recommendedFixToday}`);
+    }
   }
   if (railwayHealth && railwayHealth.errors && railwayHealth.errors.length > 0) {
     priorityCandidates.push(`Railway: ${railwayHealth.errors[0]}`);
   }
-  const topPriorities =
-    priorityCandidates.length > 0
-      ? priorityCandidates.slice(0, 3)
-      : [
-          'Connect Notion to Railway Automation Hub',
-          'Missing data sources — see below',
-          'Confirm daily brief format with founder',
-        ];
+  const hasConnectedSource = Boolean(salesMetrics || railwayHealth || productBugSummary || filmAISummary || coachSalesSummary || socialMediaSummary || approvalActionSummary || weeklyStrategySummary);
+  const topPriorities = priorityCandidates.length > 0
+    ? priorityCandidates.slice(0, 3)
+    : hasConnectedSource
+      ? ['No verified operational priority established by this brief; review source evidence before acting.']
+      : ['Connect Notion to Railway Automation Hub', 'Missing data sources — see below', 'Confirm daily brief format with founder'];
 
   const missingDataSources = [];
   if (!railwayHealth) {
@@ -1790,7 +1784,7 @@ function buildDailyBriefContent({
   }
   if (approvalActionSummary && approvalActionSummary.waitingCount > 0) {
     approvalRequests.push(
-      `${approvalActionSummary.waitingCount} other approval(s) waiting for founder review — see Approvals database.`
+      `${approvalActionSummary.waitingRowCount} approval row(s) await review across ${approvalActionSummary.waitingCount} action group(s); ${approvalActionSummary.repeatedWaitingCount} row(s) repeat a group. This includes any weekly decisions above. See Approvals database.`
     );
   }
   if (approvalRequests.length === 0) {
@@ -1798,16 +1792,31 @@ function buildDailyBriefContent({
   }
 
   const titleSuffix = salesMetrics || railwayHealth ? '' : ' (test)';
-  const statusLabel = 'Yellow';
+  // Only verified release blockers escalate the company status to Red.
+  const statusLabel = releaseBlockers.length > 0 ? 'Red' : 'Yellow';
 
   const bodyBlocks = [
     heading(`Company Status: ${statusLabel}`),
     paragraph(
       salesMetrics || railwayHealth
-        ? `Daily brief generated by the Railway Automation Hub on ${displayDate}, including live data from the connected agents below.`
+        ? `Daily brief generated by the Railway Automation Hub on ${displayDate}. Connected sources include manually entered and unverified records; see Source Verification below.`
         : `This is a test brief generated by the Railway Automation Hub on ${displayDate}. ` +
             'No live data sources are connected yet — all content below is structural placeholder data.'
     ),
+    // Release Blockers always render at the very top, before any sales,
+    // social, or agent sections (founder feedback 2026-07-14: the brief gave
+    // too much equal weight to everything).
+    heading('Release Blockers'),
+    ...(releaseBlockers.length > 0
+      ? [
+          paragraph('These verified blockers override expansion until cleared:'),
+          ...numberedList(releaseBlockers),
+        ]
+      : [paragraph('No verified critical product blocker is recorded here. This does not certify that none exists.')]),
+    heading('Feature Gates'),
+    bulletedList(featureGates.length > 0 ? featureGates : ['No feature gate reported by connected sources.']),
+    heading('Source Verification'),
+    bulletedList(sourceCautions.length > 0 ? sourceCautions : ['No source limitation reported in this run.']),
   ];
 
   if (salesMetrics) {
@@ -1878,6 +1887,9 @@ function buildDailyBriefContent({
     dateLabel,
     displayDate,
     statusLabel,
+    releaseBlockers,
+    featureGates,
+    sourceCautions,
     topPriorities,
     missingDataSources,
     founderTodos,
@@ -2110,6 +2122,11 @@ function flattenChildren(children) {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
-app.listen(PORT, () => {
-  console.log(`Adaptiv Automation Hub listening on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Adaptiv Automation Hub listening on port ${PORT}`);
+  });
+}
+
+module.exports = app;
+module.exports.buildDailyBriefContent = buildDailyBriefContent;
