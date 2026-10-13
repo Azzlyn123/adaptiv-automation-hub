@@ -1,5 +1,26 @@
 # Adaptiv Automation Hub
 
+## Security rollout status
+
+The authentication change in this draft is not deployed. Before release,
+identify every scheduled or manual caller, provision `HUB_API_TOKEN` as a
+random 64-character hexadecimal server secret, and migrate those callers to
+send `Authorization: Bearer <server-secret>`. All non-health routes fail closed
+with HTTP 503 when the secret is absent or weak. `GET`/`HEAD /health` stay
+public. Keep the secret out of browsers, phone dashboards, URLs, task text,
+logs, and source control. The example POST commands below are illustrative;
+after this change they require a server-side bearer header and must not be
+run against production casually because they can write records or send mail.
+The examples use POSIX-shell `${HUB_API_TOKEN}` expansion. In PowerShell,
+pass a header populated from `$env:HUB_API_TOKEN`; do not paste a secret into
+shell history.
+
+Do not deploy this guard before the caller migration is tested. See
+[the Hub release checklist](workflow/HUB-RELEASE-CHECKLIST.md) for caller and
+rollback gates, and
+[Google delivery recovery](workflow/GOOGLE-DELIVERY-RECOVERY.md) for the
+separate OAuth and recipient-test gates.
+
 Adaptiv Athletics Railway Automation Hub. Currently does ten things:
 1. **Daily Brief writer** — writes a Daily CEO Brief into the Notion "Daily Briefs" database.
 2. **Stripe Revenue Agent** (read-only) — pulls subscription data from Stripe, writes a report row into the Notion "Sales" database, and files a Notion "Approvals" item when subscriptions are past due.
@@ -118,20 +139,20 @@ adaptiv-automation-hub/
 4. Test locally:
    ```
    curl http://localhost:3000/health
-   curl -X POST http://localhost:3000/run-daily-brief
-   curl -X POST http://localhost:3000/run-revenue-sync
-   curl -X POST http://localhost:3000/run-railway-health
-   curl -X POST http://localhost:3000/create-test-doc
-   curl -X POST http://localhost:3000/send-test-email
-   curl -X POST http://localhost:3000/send-test-sms
-   curl -X POST http://localhost:3000/run-full-brief
-   curl -X POST http://localhost:3000/submit-bug -H "Content-Type: application/json" -d "{\"title\":\"Test bug\",\"severity\":\"Low\"}"
-   curl -X POST http://localhost:3000/submit-feedback -H "Content-Type: application/json" -d "{\"feedback\":\"Test feedback\"}"
-   curl -X POST http://localhost:3000/run-product-triage
-   curl -X POST http://localhost:3000/create-film-ai-mvp-plan
-   curl -X POST http://localhost:3000/run-film-ai-planning
-   curl -X POST http://localhost:3000/add-coach-lead -H "Content-Type: application/json" -d "{\"leadName\":\"Test Coach\",\"schoolProgram\":\"Phoenix Test High School\",\"role\":\"Head Coach\",\"sport\":\"Volleyball\",\"source\":\"Founder/Referral\",\"estimatedValue\":99}"
-   curl -X POST http://localhost:3000/run-coach-sales-review
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/run-daily-brief
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/run-revenue-sync
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/run-railway-health
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/create-test-doc
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/send-test-email
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/send-test-sms
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/run-full-brief
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/submit-bug -H "Content-Type: application/json" -d "{\"title\":\"Test bug\",\"severity\":\"Low\"}"
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/submit-feedback -H "Content-Type: application/json" -d "{\"feedback\":\"Test feedback\"}"
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/run-product-triage
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/create-film-ai-mvp-plan
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/run-film-ai-planning
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/add-coach-lead -H "Content-Type: application/json" -d "{\"leadName\":\"Test Coach\",\"schoolProgram\":\"Phoenix Test High School\",\"role\":\"Head Coach\",\"sport\":\"Volleyball\",\"source\":\"Founder/Referral\",\"estimatedValue\":99}"
+   curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" http://localhost:3000/run-coach-sales-review
    ```
 
 ## Step 3A — Create a restricted Stripe key
@@ -308,13 +329,13 @@ curl https://<your-railway-domain>/health
 ```
 Then:
 ```
-curl -X POST https://<your-railway-domain>/run-revenue-sync
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://<your-railway-domain>/run-revenue-sync
 ```
 Expected: a new row appears in Notion → Sales. If any subscriptions are past due, a new row also appears in Notion → Approvals.
 
 Then:
 ```
-curl -X POST https://<your-railway-domain>/run-full-brief
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://<your-railway-domain>/run-full-brief
 ```
 Expected: a new Daily Brief appears in Notion with a "Sales Summary" section.
 
@@ -374,13 +395,13 @@ curl https://<your-railway-domain>/health
 ```
 Then:
 ```
-curl -X POST https://<your-railway-domain>/run-railway-health
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://<your-railway-domain>/run-railway-health
 ```
 Expected: a new row appears in Notion → Railway Health. If something looks wrong (backend down, slow, missing service, or failed deploy), a new row also appears in Notion → Approvals.
 
 Then:
 ```
-curl -X POST https://<your-railway-domain>/run-full-brief
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://<your-railway-domain>/run-full-brief
 ```
 Expected: a new Daily Brief appears in Notion with both a "Sales Summary" section and a "Railway Health" section.
 
@@ -463,19 +484,19 @@ The former public setup flow is disabled. Follow [Google delivery recovery](work
 ## Step 5H — Test Google delivery
 
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-test-doc
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-test-doc
 ```
 Expected: a Google Doc appears in your Drive (or in `GOOGLE_DOC_FOLDER_ID` if set).
 
 If that works:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/send-test-email
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/send-test-email
 ```
 Expected: an email arrives at `FOUNDER_EMAIL`.
 
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
 ```
 Expected: Notion Daily Brief row created, Google Doc created, email sent, Google Doc URL saved on the Notion row.
 
@@ -524,13 +545,13 @@ Built by `buildSmsSummary()` in `lib/smsDeliveryAgent.js`, capped at 320 charact
 
 After deploying with the Step 6B variables set:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/send-test-sms
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/send-test-sms
 ```
 Expected: a text arrives at `FOUNDER_PHONE_NUMBER`. If `SMS_ENABLED` isn't `"true"`, this returns `200` with `status: "disabled"` instead of sending anything.
 
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
 ```
 Expected: same as Step 5H, plus a text summary arrives at `FOUNDER_PHONE_NUMBER`, and the Notion Daily Brief row's `SMS Sent` / `SMS Status` reflect it.
 
@@ -618,7 +639,7 @@ Implemented in `computePriorityScore()` in `lib/productBugAgent.js`. Active flag
 
 After deploying with the Step 7B variables set:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/submit-bug \
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/submit-bug \
   -H "Content-Type: application/json" \
   -d '{
     "title": "Workout start button does not respond",
@@ -643,7 +664,7 @@ Expected: a new row in Notion → Product Bugs (Priority Score `75 + 15 + 15 = 1
 ## Step 7E — Test with one feedback item
 
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/submit-feedback \
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/submit-feedback \
   -H "Content-Type: application/json" \
   -d '{
     "feedback": "I do not understand what readiness score means or what I should do with it.",
@@ -738,19 +759,19 @@ The first Film AI MVP is scoped to one skill, one sport: **upload a volleyball h
 
 After deploying with the Step 8B variables set:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-film-ai-mvp-plan
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-film-ai-mvp-plan
 ```
 Expected: 7 new rows appear in Notion → Film AI Roadmap, one per MVP task, all starting at `Status: Backlog`.
 
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-film-ai-planning
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-film-ai-planning
 ```
 Expected: a new row appears in Notion → Agent Reports summarizing the roadmap status, and the JSON response includes `filmAIStatus`, `nextUp`, and the rest of the rollup.
 
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
 ```
 Expected: the Daily Brief now includes a "Film AI Build Team" section showing the roadmap status.
 
@@ -907,7 +928,7 @@ Implemented in `computeLeadScore()` in `lib/coachSalesAgent.js`. Returned as `le
 
 After deploying with the Step 9B variables set:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/add-coach-lead \
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/add-coach-lead \
   -H "Content-Type: application/json" \
   -d '{
     "leadName": "Test Coach",
@@ -924,7 +945,7 @@ Expected: a new row in Notion → Coach CRM with `Approved Outreach` unchecked, 
 ### Step 9E — Test an outreach draft
 
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/draft-coach-outreach \
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/draft-coach-outreach \
   -H "Content-Type: application/json" \
   -d '{
     "leadPageId": "<leadPageId from Step 9D>",
@@ -939,13 +960,13 @@ Expected: a new row in Notion → Coach Outreach with `Status: Needs Approval` a
 
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-coach-sales-review
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-coach-sales-review
 ```
 Expected: a new row in Notion → Agent Reports summarizing the pipeline, and the JSON response includes `coachSalesStatus`, `topLeads` (Test Coach should rank first), and `target` (first-sales progress).
 
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
 ```
 Expected: the Daily Brief now includes a "Coach Sales" section showing the pipeline status and top-ranked leads.
 
@@ -1077,7 +1098,7 @@ Implemented in `computeEngagementRate()` in `lib/socialMediaAgent.js`, stored as
 
 After deploying with the Step 10B variables set:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/add-social-post \
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/add-social-post \
   -H "Content-Type: application/json" \
   -d '{
     "postTitle": "Founder story test reel",
@@ -1094,13 +1115,13 @@ Expected: a new row in Notion → Social Metrics with `Engagement Rate` computed
 
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-social-review
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-social-review
 ```
 Expected: a new row in Notion → Agent Reports summarizing content/inbox/calendar status, and the JSON response includes `socialMediaStatus` and `topPosts` (the test reel should appear).
 
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
 ```
 Expected: the Daily Brief now includes a "Social Media" section showing the tracked post and current status. Confirm nothing was posted, replied to, or scheduled anywhere — only Notion rows were created.
 
@@ -1241,20 +1262,20 @@ All in `lib/approvalActionAgent.js`:
 ### Step 11E — Test it (safe action)
 
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-test-approval \
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-test-approval \
   -H "Content-Type: application/json" \
   -d '{"action":"Create onboarding follow-up task","risk":"Low","tool":"Notion","status":"Approved","payload":{"type":"CREATE_NOTION_TASK","name":"Follow up with new athlete signup"}}'
 ```
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-approved-actions
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-approved-actions
 ```
 Expected: a new row in Notion Tasks, the Approvals row's `Status` → `Executed`, and `Result` populated with a confirmation message.
 
 ### Step 11F — Test it (blocked critical action)
 
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-test-approval \
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/create-test-approval \
   -H "Content-Type: application/json" \
   -d '{"action":"Refund angry customer","risk":"Critical","tool":"Stripe","status":"Approved","payload":{"type":"REFUND_PAYMENT","amount":4999,"customerId":"cus_fake"}}'
 ```
@@ -1383,7 +1404,7 @@ Overall Status: Green / Yellow / Red
 ### Step 12E — Test it
 
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-weekly-strategy-review
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-weekly-strategy-review
 ```
 Expected:
 1. A new row in Weekly Strategy Reviews.
@@ -1394,7 +1415,7 @@ Expected:
 
 Then:
 ```
-curl -X POST https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
+curl -X POST -H "Authorization: Bearer ${HUB_API_TOKEN}" https://YOUR-AUTOMATION-HUB-URL.up.railway.app/run-full-brief
 ```
 Expected: the Daily Brief includes a short "Weekly Strategy" section if a review was created in the last 8 days.
 

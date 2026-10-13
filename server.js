@@ -103,9 +103,11 @@ const coachSalesAgent = require('./lib/coachSalesAgent');
 const socialMediaAgent = require('./lib/socialMediaAgent');
 const approvalActionAgent = require('./lib/approvalActionAgent');
 const weeklyStrategyAgent = require('./lib/weeklyStrategyAgent');
+const { createHubAccess } = require('./lib/hubAccess');
 
 const app = express();
-app.use(express.json());
+app.use(createHubAccess());
+app.use(express.json({ limit: '100kb' }));
 
 const PORT = process.env.PORT || 3000;
 

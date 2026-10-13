@@ -15,16 +15,18 @@ Status: held. This checklist does not authorize a production deployment or a mes
 - The current production build still exposes the legacy browser OAuth setup
   routes. Do not use `/auth/google` or `/oauth2callback` to rotate credentials:
   the old callback can return and log a refresh token.
-- The local default-deny Hub patch is not deployment-ready until every live
+- The draft default-deny Hub patch is not deployment-ready until every live
   caller has a server-side bearer credential. No browser or phone dashboard
   may receive that shared credential.
 
 ## Staged recovery
 
-1. Inventory and pause scheduled Hub callers. Review the combined local diff,
+1. Inventory and pause scheduled Hub callers. Review the combined draft diff,
    run `npm test`, and stage a release that disables the public OAuth setup
-   routes without breaking existing brief triggers. Confirm the live routes
-   return 410 and do not exchange or print tokens.
+   routes without breaking existing brief triggers. Configure the Hub and
+   each approved server-side caller with the same bearer credential before
+   deploying the fail-closed guard. Confirm the live OAuth routes return 410
+   for an authorized caller and never exchange or print tokens.
 2. Complete OAuth Branding with a verified application homepage and public
    privacy/terms links. The configured scopes are `documents` (all Docs),
    `drive.file` (files used by the app), and `gmail.send` (send on behalf of
