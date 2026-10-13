@@ -6,12 +6,20 @@ Status: held. This draft does not authorize a merge, deploy, or message send.
 
 - Railway's production Hub service has no cron schedule configured as of
   2026-10-13. This does not rule out a Claude routine or other external caller.
+- Railway HTTP metadata shows eight successful `POST /run-full-brief` requests
+  from October 6-13, including requests near 15:00 UTC on October 10-13.
+  It shows one `POST /run-weekly-strategy-review` on October 12 at
+  03:43 UTC. All used `curl/8.5.0`. HTTP 201 confirms the handler responded,
+  not that Google delivered a message or that the caller is authenticated.
+  No other POST route appeared in the same seven-day log window. This is
+  observation of traffic, not a verified schedule or caller identity.
 - Identify every caller of `/run-full-brief`, `/run-weekly-strategy-review`,
   and all other POST routes. Record who owns it, how it stores credentials,
   and whether it can send an `Authorization` header. Do not put the shared
   token in a browser, phone dashboard, URL, prompt, Notion row, or log.
-- The October 13 brief was triggered, but the initiating caller and its
-  schedule are not yet verified. Do not infer that a daily run is configured.
+- The initiating caller and its schedule are not yet verified. Do not merge
+  the fail-closed auth change until the caller can use a server-side secret
+  and a staged run succeeds; otherwise the existing brief flow will stop.
 
 ## Before release
 
