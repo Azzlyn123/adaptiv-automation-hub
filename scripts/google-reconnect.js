@@ -4,8 +4,7 @@ const { createServer } = require('node:http');
 const { google } = require('googleapis');
 const { SCOPES } = require('../lib/googleDeliveryAgent');
 
-const PORT = 3000;
-const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
+const DEFAULT_PORT = 3000;
 const SERVICE_NAME = 'adaptiv-automation-hub';
 const ENVIRONMENT_NAME = 'production';
 
@@ -13,16 +12,19 @@ function parseArgs(args) {
   const values = {};
   for (let i = 0; i < args.length; i += 2) {
     const flag = args[i];
-    if (!['--project', '--service', '--mode'].includes(flag) || !args[i + 1] || values[flag]) {
-      throw new Error('Use --project <UUID> --service <UUID> --mode check|authorize.');
+    if (!['--project', '--service', '--mode', '--port'].includes(flag) || !args[i + 1] || values[flag]) {
+      throw new Error('Use --project <UUID> --service <UUID> --mode check|authorize [--port <number>].');
     }
     values[flag] = args[i + 1];
   }
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!uuid.test(values['--project'] || '') || !uuid.test(values['--service'] || '') || !['check', 'authorize'].includes(values['--mode'])) {
-    throw new Error('Use --project <UUID> --service <UUID> --mode check|authorize.');
+  const portText = values['--port'];
+  const port = portText === undefined ? DEFAULT_PORT : Number(portText);
+  if (!uuid.test(values['--project'] || '') || !uuid.test(values['--service'] || '') || !['check', 'authorize'].includes(values['--mode']) ||
+      (portText !== undefined && !/^\d+$/.test(portText)) || !Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error('Use --project <UUID> --service <UUID> --mode check|authorize [--port <number>].');
   }
-  return { projectId: values['--project'], serviceId: values['--service'], mode: values['--mode'] };
+  return { projectId: values['--project'], serviceId: values['--service'], mode: values['--mode'], port };
 }
 
 function parseRailwayJson(output) {
@@ -90,16 +92,16 @@ function matchesState(actual, expected) {
   return timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 
-function createCallbackHandler({ state, oauthClient, storeToken, finish }) {
+function createCallbackHandler({ state, oauthClient, storeToken, finish, port = DEFAULT_PORT }) {
   let consumed = false;
   return async (request, response) => {
     response.setHeader('Content-Type', 'text/plain; charset=utf-8');
     response.setHeader('Cache-Control', 'no-store');
-    if (request.method !== 'GET' || request.headers.host !== `localhost:${PORT}`) {
+    if (request.method !== 'GET' || request.headers.host !== `localhost:${port}`) {
       response.writeHead(400).end('Invalid local callback.');
       return;
     }
-    const url = new URL(request.url, REDIRECT_URI);
+    const url = new URL(request.url, `http://localhost:${port}/oauth2callback`);
     if (url.pathname !== '/oauth2callback') {
       response.writeHead(404).end('Not found.');
       return;
@@ -139,12 +141,14 @@ async function main() {
   if (!process.stdin.isTTY) throw new Error('Authorization requires an interactive local terminal.');
 
   const state = randomBytes(32).toString('hex');
-  const oauthClient = new google.auth.OAuth2(variables.GOOGLE_CLIENT_ID, variables.GOOGLE_CLIENT_SECRET, REDIRECT_URI);
+  const redirectUri = `http://localhost:${target.port}/oauth2callback`;
+  const oauthClient = new google.auth.OAuth2(variables.GOOGLE_CLIENT_ID, variables.GOOGLE_CLIENT_SECRET, redirectUri);
   const authUrl = oauthClient.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: SCOPES, state });
   await new Promise((resolve, reject) => {
     const server = createServer(createCallbackHandler({
       state,
       oauthClient,
+      port: target.port,
       storeToken: (token) => runRailway([
         'variable', 'set', 'GOOGLE_REFRESH_TOKEN', '--stdin', '--skip-deploys',
         '--service', target.serviceId, '--environment', ENVIRONMENT_NAME,
@@ -154,9 +158,9 @@ async function main() {
     let timer;
     server.once('error', () => {
       if (timer) clearTimeout(timer);
-      reject(new Error('Local port 3000 is unavailable. No token was stored.'));
+      reject(new Error(`Local port ${target.port} is unavailable. No token was stored.`));
     });
-    server.listen(PORT, '127.0.0.1', () => {
+    server.listen(target.port, '127.0.0.1', () => {
       console.log('Open this Google authorization URL in a browser on this computer:');
       console.log(authUrl);
       console.log('This is a temporary recovery while the Google app remains in Testing.');

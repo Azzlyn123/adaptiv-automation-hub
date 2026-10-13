@@ -42,8 +42,15 @@ Status: held. This checklist does not authorize a production deployment or a mes
    The local `scripts/google-reconnect.js` helper has a read-only `check`
    mode and a separate interactive `authorize` mode. Run it from a directory
    already linked to the intended Railway project, with the exact project and
-   Hub service UUIDs passed as `--project` and `--service`. First run `check`;
-   only after owner approval and disabling the public production callback,
+   Hub service UUIDs passed as `--project` and `--service`. First run `check`.
+   The localhost port defaults to 3000, but an explicit `--port` may be used
+   when that port is occupied. The exact `http://localhost:<port>/oauth2callback`
+   URI must be registered on the Google OAuth client before `authorize`;
+   the production `GOOGLE_REDIRECT_URI` currently points to Railway and does
+   not establish that the localhost URI is registered. On October 13, port
+   3000 was occupied on the owner PC; port 8765 was free at the time of the
+   check, not reserved. Do not stop the unrelated listener to make room.
+   Only after owner approval and disabling the public production callback,
    run `authorize` on the owner's computer. It stores the token via Railway
    stdin with deploys skipped; it does not test delivery or restart the app.
 4. Restart only the intended Hub service. Test one synthetic brief to the

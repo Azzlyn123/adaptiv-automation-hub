@@ -19,10 +19,14 @@ test('reconnect accepts only explicit, validated target and mode', () => {
     projectId,
     serviceId,
     mode: 'check',
+    port: 3000,
   });
+  assert.equal(parseArgs(['--project', projectId, '--service', serviceId, '--mode', 'authorize', '--port', '8765']).port, 8765);
   assert.throws(() => parseArgs(['--project', 'bad', '--service', serviceId, '--mode', 'authorize']));
   assert.throws(() => parseArgs(['--project', projectId, '--service', serviceId, '--mode', 'write']));
   assert.throws(() => parseArgs(['--project', projectId, '--service', serviceId, '--mode', 'check', '--extra', 'yes']));
+  assert.throws(() => parseArgs(['--project', projectId, '--service', serviceId, '--mode', 'check', '--port', '0']));
+  assert.throws(() => parseArgs(['--project', projectId, '--service', serviceId, '--mode', 'check', '--port', '8765;evil']));
 });
 
 test('malformed Railway output never echoes a secret in parse errors', () => {
@@ -61,7 +65,7 @@ test('reconnect requires a refresh token and every delivery scope', () => {
   assert.equal(matchesState(null, 'abc'), false);
 });
 
-async function withCallback({ tokens, code = 'synthetic-code' }, run) {
+async function withCallback({ tokens, code = 'synthetic-code', port = 3000 }, run) {
   let exchanges = 0;
   const stored = [];
   const server = createServer(createCallbackHandler({
@@ -73,10 +77,11 @@ async function withCallback({ tokens, code = 'synthetic-code' }, run) {
     } },
     storeToken: async (token) => stored.push(token),
     finish: () => {},
+    port,
   }));
   server.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
-  const request = (path, host = 'localhost:3000') => new Promise((resolve, reject) => {
+  const request = (path, host = `localhost:${port}`) => new Promise((resolve, reject) => {
     const req = httpRequest({
       hostname: '127.0.0.1',
       port: server.address().port,
@@ -112,6 +117,15 @@ test('callback stores only a complete grant once and rejects replay', async () =
     assert.equal((await request('/oauth2callback?code=synthetic-code&state=expected-state')).status, 200);
     assert.equal((await request('/oauth2callback?code=synthetic-code&state=expected-state')).status, 403);
     assert.equal(exchanges(), 1);
+    assert.deepEqual(stored, ['synthetic']);
+  });
+});
+
+test('callback accepts only the selected local port in the Host header', async () => {
+  await withCallback({ tokens: { refresh_token: 'synthetic', scope: SCOPES.join(' ') }, port: 8765 }, async ({ request, stored }) => {
+    const path = '/oauth2callback?code=synthetic-code&state=expected-state';
+    assert.equal((await request(path, 'localhost:3000')).status, 400);
+    assert.equal((await request(path)).status, 200);
     assert.deepEqual(stored, ['synthetic']);
   });
 });
