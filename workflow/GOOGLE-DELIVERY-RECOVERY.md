@@ -37,6 +37,13 @@ Status: held. This checklist does not authorize a production deployment or a mes
    approved Railway secret store, and never show it in a browser, chat,
    command output, repository file, or logs. Reauthorization while Testing is
    temporary and will need repeating after seven days.
+   The local `scripts/google-reconnect.js` helper has a read-only `check`
+   mode and a separate interactive `authorize` mode. Run it from a directory
+   already linked to the intended Railway project, with the exact project and
+   Hub service UUIDs passed as `--project` and `--service`. First run `check`;
+   only after owner approval and disabling the public production callback,
+   run `authorize` on the owner's computer. It stores the token via Railway
+   stdin with deploys skipped; it does not test delivery or restart the app.
 4. Restart only the intended Hub service. Test one synthetic brief to the
    founder's confirmed inbox after explicit send approval. Confirm a Google
    Doc URL, email delivery status, and recipient receipt. Do not infer receipt
