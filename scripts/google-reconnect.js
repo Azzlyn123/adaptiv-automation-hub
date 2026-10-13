@@ -25,6 +25,14 @@ function parseArgs(args) {
   return { projectId: values['--project'], serviceId: values['--service'], mode: values['--mode'] };
 }
 
+function parseRailwayJson(output) {
+  try {
+    return JSON.parse(output);
+  } catch {
+    throw new Error('Railway CLI returned invalid JSON. No values were printed.');
+  }
+}
+
 function runRailway(args, { input, capture = true } = {}) {
   return new Promise((resolve, reject) => {
     const command = process.platform === 'win32' ? 'railway.cmd' : 'railway';
@@ -116,9 +124,9 @@ function createCallbackHandler({ state, oauthClient, storeToken, finish }) {
 
 async function main() {
   const target = parseArgs(process.argv.slice(2));
-  const status = JSON.parse(await runRailway(['status', '--json']));
+  const status = parseRailwayJson(await runRailway(['status', '--json']));
   validateRailwayTarget(status, target);
-  const variables = JSON.parse(await runRailway([
+  const variables = parseRailwayJson(await runRailway([
     'variable', 'list', '--json', '--service', target.serviceId, '--environment', ENVIRONMENT_NAME,
   ]));
   if (!variables.GOOGLE_CLIENT_ID || !variables.GOOGLE_CLIENT_SECRET) {
@@ -143,13 +151,17 @@ async function main() {
       ], { input: token, capture: false }),
       finish: (error) => server.close(() => error ? reject(error) : resolve()),
     }));
-    server.once('error', () => reject(new Error('Local port 3000 is unavailable. No token was stored.')));
+    let timer;
+    server.once('error', () => {
+      if (timer) clearTimeout(timer);
+      reject(new Error('Local port 3000 is unavailable. No token was stored.'));
+    });
     server.listen(PORT, '127.0.0.1', () => {
       console.log('Open this Google authorization URL in a browser on this computer:');
       console.log(authUrl);
       console.log('This is a temporary recovery while the Google app remains in Testing.');
     });
-    const timer = setTimeout(() => server.close(() => reject(new Error('Authorization timed out. No token was stored.'))), 300000);
+    timer = setTimeout(() => server.close(() => reject(new Error('Authorization timed out. No token was stored.'))), 300000);
     server.once('close', () => clearTimeout(timer));
   });
   console.log('Refresh token stored without deployment. Review and deploy the intended Hub build separately before testing delivery.');
@@ -162,4 +174,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, validateRailwayTarget, validateGrant, matchesState, createCallbackHandler };
+module.exports = { parseArgs, parseRailwayJson, validateRailwayTarget, validateGrant, matchesState, createCallbackHandler };

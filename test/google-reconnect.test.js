@@ -4,6 +4,7 @@ const { createServer, request: httpRequest } = require('node:http');
 const { SCOPES } = require('../lib/googleDeliveryAgent');
 const {
   parseArgs,
+  parseRailwayJson,
   validateRailwayTarget,
   validateGrant,
   matchesState,
@@ -22,6 +23,16 @@ test('reconnect accepts only explicit, validated target and mode', () => {
   assert.throws(() => parseArgs(['--project', 'bad', '--service', serviceId, '--mode', 'authorize']));
   assert.throws(() => parseArgs(['--project', projectId, '--service', serviceId, '--mode', 'write']));
   assert.throws(() => parseArgs(['--project', projectId, '--service', serviceId, '--mode', 'check', '--extra', 'yes']));
+});
+
+test('malformed Railway output never echoes a secret in parse errors', () => {
+  const secret = 'synthetic-private-token';
+  assert.deepEqual(parseRailwayJson('{"ok":true}'), { ok: true });
+  assert.throws(() => parseRailwayJson(`{"value":"${secret}"`), (error) => {
+    assert.doesNotMatch(error.message, new RegExp(secret));
+    assert.match(error.message, /invalid JSON/);
+    return true;
+  });
 });
 
 test('reconnect rejects an unrelated Railway project or service', () => {

@@ -102,6 +102,26 @@ test('customer-specific approvals with identical titles remain separate', async 
   assert.equal(summary.waitingCount, 2);
 });
 
+test('grouping recurring approvals retains the highest risk instead of the last row', async () => {
+  const pages = [
+    approval('critical', 'Review failed deploy logs', 'Railway Health Agent', 'Critical', 'backend failed'),
+    approval('low', 'Review failed deploy logs', 'Railway Health Agent', 'Low', 'backend failed'),
+  ];
+  const summary = await gatherApprovalActionSummary(notionWithPages({ approvals: pages }), 'approvals');
+  assert.equal(summary.waitingRowCount, 2);
+  assert.equal(summary.waitingCount, 1);
+  assert.equal(summary.highRiskWaitingCount, 1);
+  assert.equal(summary.status, 'Red');
+  assert.match(summary.recommendedFounderReview[0], /Critical risk/);
+});
+
+test('a real approval mentioning a test is not excluded', async () => {
+  const pages = [approval('real', 'Review (test) deployment', 'Railway Health Agent', 'High')];
+  const summary = await gatherApprovalActionSummary(notionWithPages({ approvals: pages }), 'approvals');
+  assert.equal(summary.testRowCount, 0);
+  assert.equal(summary.highRiskWaitingCount, 1);
+});
+
 test('undocumented critical report is unverified; documented QA report can become verified', async () => {
   const unverified = await gatherProductBugSummary(
     notionWithPages({ bugs: [bug()], feedback: [] }),
