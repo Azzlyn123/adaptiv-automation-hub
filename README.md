@@ -458,7 +458,7 @@ Add these 4 properties to the Notion Daily Briefs database:
 
 ## Step 5G — Authorize Google privately
 
-The former public setup flow is disabled because it exposed refresh tokens in browser responses and service logs. Reconnect only through an owner-controlled helper that validates a one-time OAuth state, checks the granted scopes, and writes the refresh token directly to the intended Railway secret store without printing it. This release disables the legacy routes; it does not include or enable a replacement public setup flow.
+The former public setup flow is disabled because it exposed refresh tokens in browser responses and service logs. Reconnect only through an owner-controlled helper that validates a one-time OAuth state, checks the granted scopes, and writes the refresh token directly to the intended Railway secret store without printing it. No replacement public setup flow is enabled. See [private phone recovery](docs/private-google-reconnect.md) for the local Tailscale helper; the original localhost helper is `scripts/google-reconnect.js`.
 
 Treat tokens previously exposed by the legacy setup as compromised. Review and revoke this app's old grant in the Google account before issuing its replacement, and remove the retired public callback from the OAuth client's allowed redirects. Do not revoke unrelated apps or delete historical logs without a separate retention review. Disabling these routes alone does not invalidate tokens already issued.
 
