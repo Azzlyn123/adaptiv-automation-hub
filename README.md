@@ -79,8 +79,8 @@ adaptiv-automation-hub/
    ```
    GOOGLE_CLIENT_ID=...
    GOOGLE_CLIENT_SECRET=...
-   GOOGLE_REDIRECT_URI=http://localhost:3000/oauth2callback (or your Railway URL — see Step 5B)
-   GOOGLE_REFRESH_TOKEN=... (produced by visiting /auth/google once — see Step 5G)
+   GOOGLE_REDIRECT_URI=http://localhost:3000/oauth2callback (register the exact URI first)
+   GOOGLE_REFRESH_TOKEN=... (stored privately by an owner-controlled reconnect helper)
    GOOGLE_DOC_FOLDER_ID=... (optional — leave blank to create docs at Drive root)
    FOUNDER_EMAIL=azzlynpotts@gmail.com
    ```
@@ -210,10 +210,10 @@ Returns `201` with the computed health data and the new Notion page URL(s). Retu
 Runs the Stripe revenue sync and the Railway health check, then creates a Daily Brief that includes real **Sales Summary** and **Railway Health** sections built from that same data, instead of listing Stripe/Railway as missing data sources. Also reads the current Product Bugs + Beta Feedback state (Step 7) and, if `NOTION_DATABASE_PRODUCT_BUGS`/`NOTION_DATABASE_BETA_FEEDBACK` are set, folds a **Product / Bug Agent** section into the brief too — additive, same as the rest of this route: a missing var or a failed Notion read here never blocks the brief. Also reads the current Film AI Roadmap state (Step 8) and, if `NOTION_DATABASE_FILM_AI_ROADMAP` is set, folds a **Film AI Build Team** section into the brief too — same additive pattern, read-only, never runs CV code or touches video. Then attempts Google Doc + email delivery (Step 5), then an SMS summary (Step 6), and writes the results (Google Doc URL / Email Sent / Email Error / Delivery Status, plus SMS Sent / SMS Error / SMS Status) back onto the same Daily Brief row. Neither Google delivery nor SMS ever blocks this response — if either is not configured or fails, the Notion brief is still created; `delivery.deliveryStatus` comes back as `Not Sent` / `Partial` / `Failed` and `sms.smsStatus` comes back as `Disabled` / `Failed` / `Sent`. Returns `201` with the metrics, health data, `productBugSummary`, `filmAISummary`, the Sales/Railway Health/Approvals page URLs (as applicable), the Daily Brief page URL, the `delivery` result, and the `sms` result.
 
 ### `GET /auth/google`
-Step 5G one-time setup route. Visit this **in a browser** (not curl) to start the OAuth consent flow — redirects to Google's consent screen for the scopes in Step 5C.
+Retired. Returns `410` without redirecting. Public browser setup is disabled.
 
 ### `GET /oauth2callback`
-Google redirects here after you approve consent. Exchanges the one-time code for tokens and returns the refresh token **once**, to be copied into Railway as `GOOGLE_REFRESH_TOKEN`. No other route in this service ever exposes it.
+Retired. Returns `410` without exchanging a code, returning a token, or logging credentials. The owner-controlled reconnect process must use a separately registered callback, not this public endpoint. Other HTTP methods on both retired paths also return `410`.
 
 ### `POST /create-test-doc`
 Step 5H. Creates a small test Google Doc to confirm OAuth + Docs/Drive scopes work. Returns `201` with the doc URL.
@@ -416,16 +416,12 @@ Do this yourself in the Google Cloud Console — this service, and this assistan
 
 1. APIs & Services → Credentials → Create Credentials → **OAuth client ID**.
 2. Application type: **Web application**. Name: `Adaptiv Automation Hub`.
-3. Add an authorized redirect URI:
-   ```
-   https://YOUR-AUTOMATION-HUB-URL.up.railway.app/oauth2callback
-   ```
-   (Use your actual Railway domain — the one you got from Settings → Networking in Step 4.)
-4. Also add the local testing URI:
+3. Register the exact callback used by the owner-controlled reconnect helper, for example:
    ```
    http://localhost:3000/oauth2callback
    ```
-5. Download the OAuth client info, but **do not paste it into chat or a doc**. You need `Client ID` and `Client secret` from it for Railway (Step 5D).
+   A different port must be registered explicitly. A phone cannot reach a callback running on the PC through `localhost`; a reviewed private HTTPS recovery callback is needed for phone-only consent. Do not use the retired public Railway callback.
+4. Keep OAuth client information private. Store the client ID and secret directly in Railway, never in chat, logs, or a document.
 
 ## Step 5C — Scopes
 
@@ -442,12 +438,12 @@ On the `adaptiv-automation-hub` Railway service, set:
 ```
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
-GOOGLE_REDIRECT_URI=https://YOUR-AUTOMATION-HUB-URL.up.railway.app/oauth2callback
+GOOGLE_REDIRECT_URI=http://localhost:3000/oauth2callback
 GOOGLE_REFRESH_TOKEN=
 FOUNDER_EMAIL=azzlynpotts@gmail.com
 GOOGLE_DOC_FOLDER_ID=
 ```
-`GOOGLE_REFRESH_TOKEN` doesn't exist yet at this point — it's produced by the OAuth flow in Step 5G, after this code is deployed. Leave it blank for now and come back to it.
+`GOOGLE_REFRESH_TOKEN` is produced by the owner-controlled OAuth reconnect process in Step 5G. Never copy it out of a browser response or service logs.
 
 ## Step 5F — Notion Daily Briefs properties
 
@@ -460,16 +456,15 @@ Add these 4 properties to the Notion Daily Briefs database:
 | Email Error | Text |
 | Delivery Status | Select (Not Sent / Sent / Partial / Failed) |
 
-## Step 5G — Deploy and authorize Google
+## Step 5G — Authorize Google privately
 
-After this code is deployed to Railway with `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` set:
+The former public setup flow is disabled because it exposed refresh tokens in browser responses and service logs. Reconnect only through an owner-controlled helper that validates a one-time OAuth state, checks the granted scopes, and writes the refresh token directly to the intended Railway secret store without printing it. This release disables the legacy routes; it does not include or enable a replacement public setup flow.
 
-1. Open `https://YOUR-AUTOMATION-HUB-URL.up.railway.app/auth/google` in your browser.
-2. Sign in with the Google account you want the hub to send from, and approve the requested scopes.
-3. You'll land on `/oauth2callback`, which shows a `refreshToken` value once — copy it.
-4. Add it to Railway as `GOOGLE_REFRESH_TOKEN`, then redeploy.
+Treat tokens previously exposed by the legacy setup as compromised. Review and revoke this app's old grant in the Google account before issuing its replacement, and remove the retired public callback from the OAuth client's allowed redirects. Do not revoke unrelated apps or delete historical logs without a separate retention review. Disabling these routes alone does not invalidate tokens already issued.
 
-Keep the refresh token private — it's a long-lived credential. If you ever need a new one (e.g. you revoked access), visit `/auth/google` again; if Google doesn't return a fresh refresh token because this app was already authorized before, revoke access first at [myaccount.google.com/permissions](https://myaccount.google.com/permissions) and retry.
+After the token is stored, restart only the intended Hub service and send one clearly labeled synthetic test to the configured founder inbox. API acceptance does not prove inbox receipt. Do not rerun the full brief casually: it writes Notion records and may send real messages. Restoring email does not require enabling paid SMS.
+
+An External OAuth app in Testing can require repeated authorization: [Google documents seven-day refresh-token expiration](https://developers.google.com/identity/protocols/oauth2#expiration) for non-identity scopes. Publishing or broadening access is a separate owner decision.
 
 ## Step 5H — Test Google delivery
 

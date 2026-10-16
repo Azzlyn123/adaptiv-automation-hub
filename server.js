@@ -1417,66 +1417,12 @@ app.post('/run-full-brief', async (req, res) => {
   }
 });
 
-// GET /auth/google
-// Step 5G: one-time setup route. Redirects the founder to Google's OAuth
-// consent screen. Visit this in a browser, not curl — it's a redirect meant
-// for a human to click through.
-app.get('/auth/google', (req, res) => {
-  const missing = googleDeliveryAgent.getMissingEnvVars(googleDeliveryAgent.OAUTH_SETUP_REQUIRED_ENV_VARS);
-  if (missing.length > 0) {
-    return res.status(500).json({
-      error: 'Missing required environment variables',
-      missing,
-    });
-  }
-
-  return res.redirect(googleDeliveryAgent.getAuthUrl());
-});
-
-// GET /oauth2callback
-// Step 5G: Google redirects here after consent, with a one-time ?code=.
-// Exchanges it for tokens and shows the refresh token ONCE so it can be
-// copied into Railway as GOOGLE_REFRESH_TOKEN. This route is the setup
-// flow itself, so displaying the token here is intentional — no other
-// route in this service ever exposes it.
-app.get('/oauth2callback', async (req, res) => {
-  const missing = googleDeliveryAgent.getMissingEnvVars(googleDeliveryAgent.OAUTH_SETUP_REQUIRED_ENV_VARS);
-  if (missing.length > 0) {
-    return res.status(500).json({
-      error: 'Missing required environment variables',
-      missing,
-    });
-  }
-
-  const code = req.query.code;
-  if (!code) {
-    return res.status(400).json({ error: 'Missing ?code= from Google OAuth redirect.' });
-  }
-
-  try {
-    const tokens = await googleDeliveryAgent.exchangeCodeForTokens(code);
-
-    if (tokens.refresh_token) {
-      console.log('[google oauth setup] Refresh token (copy this into Railway as GOOGLE_REFRESH_TOKEN):');
-      console.log(tokens.refresh_token);
-    } else {
-      console.warn(
-        '[google oauth setup] No refresh_token in the response — Google only issues one on first consent. ' +
-          'If you already authorized this app before, revoke access at https://myaccount.google.com/permissions ' +
-          'and visit /auth/google again.'
-      );
-    }
-
-    return res.status(200).json({
-      status: 'ok',
-      message: tokens.refresh_token
-        ? 'Authorization complete. Copy refreshToken below into Railway as GOOGLE_REFRESH_TOKEN, then redeploy. Keep it private.'
-        : 'Authorization complete, but no refresh token was issued (already authorized before). Revoke access at https://myaccount.google.com/permissions and try /auth/google again to force a new one.',
-      refreshToken: tokens.refresh_token || null,
-    });
-  } catch (err) {
-    return handleGoogleError(res, err);
-  }
+// Credential rotation must never return tokens through the public Hub.
+app.all(['/auth/google', '/oauth2callback'], (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.status(410).json({
+    error: 'Browser OAuth setup is disabled. Use the owner-controlled reconnect helper.',
+  });
 });
 
 // POST /create-test-doc
@@ -1959,7 +1905,7 @@ function handleGoogleError(res, err) {
     return res.status(401).json({
       error:
         'Google rejected the request as unauthorized. Check GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / ' +
-        'GOOGLE_REDIRECT_URI / GOOGLE_REFRESH_TOKEN — the refresh token may need to be regenerated via /auth/google.',
+        'GOOGLE_REDIRECT_URI / GOOGLE_REFRESH_TOKEN. Use the owner-controlled reconnect helper if reauthorization is required.',
       details: (err.response && err.response.data) || err.message,
     });
   }
@@ -2110,6 +2056,10 @@ function flattenChildren(children) {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
-app.listen(PORT, () => {
-  console.log(`Adaptiv Automation Hub listening on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Adaptiv Automation Hub listening on port ${PORT}`);
+  });
+}
+
+module.exports = app;
