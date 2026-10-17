@@ -2,6 +2,7 @@ const { execFile } = require('node:child_process');
 const { createHash, randomBytes } = require('node:crypto');
 const { createServer } = require('node:http');
 const path = require('node:path');
+const { isDeepStrictEqual } = require('node:util');
 const { google } = require('googleapis');
 const { SCOPES } = require('../lib/googleDeliveryAgent');
 const { parseRailwayJson, runRailway, validateRailwayTarget, validateGrant, matchesState } = require('./google-reconnect');
@@ -180,14 +181,50 @@ function createPhoneHandler({ host, ownerLogin, founderEmail, oauthClient, store
   };
 }
 
-function tailscaleJson(args) {
+function runTailscale(args) {
   const binary = process.platform === 'win32' ? path.join(process.env.ProgramFiles || 'C:/Program Files', 'Tailscale', 'tailscale.exe') : 'tailscale';
   return new Promise((resolve, reject) => {
     execFile(binary, args, { timeout: 15000, maxBuffer: 2_000_000, windowsHide: true }, (error, stdout) => {
       if (error) { reject(new Error('Private Tailscale configuration could not be verified.')); return; }
-      try { resolve(JSON.parse(stdout)); } catch { reject(new Error('Invalid Tailscale status. No values printed.')); }
+      resolve(stdout);
     });
   });
+}
+
+async function tailscaleJson(args) {
+  try { return JSON.parse(await runTailscale(args)); }
+  catch { throw new Error('Private Tailscale status could not be read. No values printed.'); }
+}
+
+async function cleanupPrivateMount(target, expectedRoot, {
+  readConfig = () => tailscaleJson(['serve', 'status', '--json']),
+  removeMount = mount => runTailscale(['serve', '--yes', '--https=443', `--set-path=${mount}`, 'off']),
+} = {}) {
+  const before = await readConfig();
+  const handlers = before.Web?.[`${target.host}:443`]?.Handlers;
+  const mounts = [PREFIX, `${PREFIX}/`].filter(mount => handlers?.[mount]);
+  if (!mounts.length) return 'absent';
+  if (mounts.length !== 1 || !expectedRoot || !isDeepStrictEqual(handlers['/'], expectedRoot) ||
+      !isDeepStrictEqual(handlers[mounts[0]], { Proxy: `http://127.0.0.1:${target.port}` }) ||
+      before.TCP?.['443']?.HTTPS !== true || Object.values(before.AllowFunnel || {}).some(Boolean)) {
+    return 'skipped';
+  }
+  const expected = structuredClone(before);
+  delete expected.Web[`${target.host}:443`].Handlers[mounts[0]];
+  await removeMount(mounts[0]);
+  return isDeepStrictEqual(await readConfig(), expected) ? 'removed' : 'unconfirmed';
+}
+
+async function closeRecoveryWindow(server, cleanup) {
+  // Keep our port bound until cleanup finishes so it cannot target a successor.
+  if (!server.listening) return 'skipped';
+  let result;
+  try { result = await cleanup(); } catch { result = 'unconfirmed'; }
+  await new Promise(resolve => {
+    const forceClose = setTimeout(() => server.closeAllConnections(), 90000);
+    server.close(() => { clearTimeout(forceClose); resolve(); });
+  });
+  return result;
 }
 
 async function main() {
@@ -195,7 +232,9 @@ async function main() {
   validateRailwayTarget(parseRailwayJson(await runRailway(['status', '--json'])), target);
   const variables = parseRailwayJson(await runRailway(['variable', 'list', '--json', '--service', target.serviceId, '--environment', 'production']));
   if (!variables.GOOGLE_CLIENT_ID || !variables.GOOGLE_CLIENT_SECRET || !variables.FOUNDER_EMAIL) throw new Error('Google client or founder email is not configured.');
-  const ownerLogin = validatePrivateNetwork(await tailscaleJson(['status', '--json']), await tailscaleJson(['serve', 'status', '--json']), target);
+  const serveConfig = await tailscaleJson(['serve', 'status', '--json']);
+  const ownerLogin = validatePrivateNetwork(await tailscaleJson(['status', '--json']), serveConfig, target);
+  const expectedRoot = structuredClone(serveConfig.Web[`${target.host}:443`].Handlers['/']);
   if (target.mode === 'check') { console.log('Production Hub, Google client fields, and private owner network verified. No authorization or writes performed.'); return; }
   const oauthClient = limitGoogleRequests(new google.auth.OAuth2(variables.GOOGLE_CLIENT_ID, variables.GOOGLE_CLIENT_SECRET, `https://${target.host}${CALLBACK}`));
   const server = createServer(createPhoneHandler({
@@ -210,20 +249,25 @@ async function main() {
   server.maxHeadersCount = 40;
   await new Promise((resolve, reject) => {
     let timer;
-    let forceClose;
     server.once('error', () => { if (timer) clearTimeout(timer); reject(new Error('Private callback port unavailable. Nothing was stored.')); });
     server.listen(target.port, '127.0.0.1', () => {
       console.log(`Private connection page ready at https://${target.host}${PREFIX}/`);
       console.log('Explicit phone consent required. No deployment, email, or SMS will be sent by this helper.');
     });
     timer = setTimeout(() => {
-      server.close(resolve);
-      forceClose = setTimeout(() => server.closeAllConnections(), 90000);
+      closeRecoveryWindow(server, () => cleanupPrivateMount(target, expectedRoot)).then(result => {
+        console.log(`Private callback cleanup: ${result}. No credential was printed.`);
+        if (!['removed', 'absent'].includes(result)) {
+          console.error('Private callback cleanup needs manual inspection. No configuration reset was attempted.');
+          process.exitCode = 2;
+        }
+        resolve();
+      }, () => reject(new Error('Private recovery shutdown could not be confirmed.')));
     }, target.ttlMinutes * 60000);
-    server.once('close', () => { clearTimeout(timer); clearTimeout(forceClose); });
+    server.once('close', () => clearTimeout(timer));
   });
   console.log('Private Google recovery window closed.');
 }
 
 if (require.main === module) main().catch(() => { console.error('Private Google recovery stopped. No credential was printed; return to Codex.'); process.exitCode = 1; });
-module.exports = { parseArgs, validatePrivateNetwork, createPhoneHandler, limitGoogleRequests, CALLBACK, PREFIX };
+module.exports = { parseArgs, validatePrivateNetwork, createPhoneHandler, limitGoogleRequests, cleanupPrivateMount, closeRecoveryWindow, CALLBACK, PREFIX };

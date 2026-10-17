@@ -47,10 +47,21 @@ Railway, send messages, or enable SMS.
 7. Confirm the result before separately restarting only the intended Hub
    build and sending one synthetic founder-only email test. Sending and
    receipt are separate checks. Do not run the full brief just to probe it.
-8. Remove only the temporary Serve mount with
+8. Normal window expiry now removes only the matching temporary mount while
+   this helper still owns its listening port. It verifies the existing root
+   and all remaining Serve configuration are unchanged. An absent mount is
+   harmless; a changed or ambiguous mount is left untouched, and a failed
+   verification is reported as unconfirmed without a retry or reset.
+   Skipped or unconfirmed cleanup exits with code 2 and a manual-inspection
+   message. The CLI's config-read/path-remove sequence is not atomic; do not
+   retarget the temporary mount concurrently with shutdown. The post-check
+   detects concurrent differences but does not overwrite them with a rollback.
+   After an abrupt stop or a skipped/unconfirmed cleanup, inspect and remove
+   only the owned temporary Serve mount with
    `tailscale serve --https=443 --set-path=/google-reconnect off`. Stop this
    exact helper process if still running. Never reset the full Serve config
-   or stop the Mission Control dashboard. The helper also exits at its TTL.
+   or stop the Mission Control dashboard. No credentials or messages are
+   created by this cleanup.
 
 The helper checks Tailscale's injected owner login on every request and
 rejects Funnel request headers. It trusts the local daemon/loopback proxy;
@@ -59,6 +70,10 @@ loopback headers and are outside this boundary. It is a temporary recovery tool,
 permanent public account-linking service. The original localhost helper is
 also included for owner-PC use; Windows assumes Railway's normal global npm
 installation. Neither helper installs new dependencies or broadens access.
+
+A wrong-account grant is not stored, but Google's consent may remain on that
+account. Review that account's connected-app permissions deliberately; this
+helper does not revoke a grant or broaden permissions automatically.
 
 Abandoned, expired, or failed attempts require stopping and restarting this
 exact helper; there is no automatic retry. Google token exchange has a
